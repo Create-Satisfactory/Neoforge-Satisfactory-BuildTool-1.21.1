@@ -1,0 +1,27 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "A": {
+      "item": "minecraft:sea_lantern"
+    },
+    "$": {
+      "item": "minecraft:yellow_concrete"
+    },
+    "%": {
+      "item": "minecraft:ender_pearl"
+    },
+    "#": {
+      "item": "minecraft:iron_ingot"
+    }
+  },
+  "pattern": [
+    "A$ ",
+    "$% ",
+    "  #"
+  ],
+  "result": {
+    "id": "satisfactory_build_tool:build_tool"
+  },
+  "show_notification": true
+}
