@@ -1,19 +1,18 @@
 package com.Infinity.Nexus.Satisfactory.BuildTool.item;
 
 import com.Infinity.Nexus.Satisfactory.BuildTool.client.ClientStructureTracker;
-import com.Infinity.Nexus.Satisfactory.BuildTool.client.gui.BuildToolScreen;
-import com.Infinity.Nexus.Satisfactory.BuildTool.client.gui.ClearModeScreen;
+
 import com.Infinity.Nexus.Satisfactory.BuildTool.config.Config;
 import com.Infinity.Nexus.Satisfactory.BuildTool.networking.ModMessages;
 import com.Infinity.Nexus.Satisfactory.BuildTool.networking.packet.StructureDestroyC2SPacket;
 import com.Infinity.Nexus.Satisfactory.BuildTool.networking.packet.StructurePlacementC2SPacket;
 import com.Infinity.Nexus.Satisfactory.BuildTool.utils.*;
 import com.Infinity.Nexus.Satisfactory.BuildTool.utils.PlacedStructure;
+
 import net.minecraft.ChatFormatting;
-import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.screens.Screen;
+
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.network.chat.Component;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
@@ -23,7 +22,7 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.PickaxeItem;
 import net.minecraft.world.item.Tiers;
-import net.minecraft.world.item.TooltipFlag;
+import net.minecraft.world.item.component.CustomData;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -31,14 +30,16 @@ import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 
 public class BuildTool extends PickaxeItem {
     private static int selectedStructureIndex = 0;
     private static List<StructureLoader.StructureData> availableStructures;
     // Maps to store selection data per player and per side (Client/Server)
-    private static final java.util.Map<java.util.UUID, SelectionData> clientSelections = new java.util.HashMap<>();
-    private static final java.util.Map<java.util.UUID, SelectionData> serverSelections = new java.util.HashMap<>();
+    private static final Map<UUID, SelectionData> clientSelections = new java.util.HashMap<>();
+    private static final Map<UUID, SelectionData> serverSelections = new java.util.HashMap<>();
 
     private static class SelectionData {
         public BlockPos point1;
@@ -65,7 +66,7 @@ public class BuildTool extends PickaxeItem {
     }
 
     private static BuildMode currentMode = BuildMode.CONSTRUCTION;
-    
+
     // Sistema de cooldown para evitar cliques duplos na destruição
     private static long lastDestructionTime = 0;
     private static final long DESTRUCTION_COOLDOWN_MS = 500; // 500ms de cooldown
@@ -101,7 +102,7 @@ public class BuildTool extends PickaxeItem {
         data.point2 = null;
         data.selectingArea = false;
     }
-    
+
     public static void resetParcialSelection(Player player) {
         SelectionData data = getSelectionData(player);
         if(data.point2 != null) {
@@ -114,7 +115,7 @@ public class BuildTool extends PickaxeItem {
             resetSelection(player);
         }
     }
-    
+
     public static void cycleMode(Player player) {
         resetSelection(player);
         currentMode = switch (currentMode) {
@@ -123,7 +124,7 @@ public class BuildTool extends PickaxeItem {
             case CLEAR -> BuildMode.NONE;
             case NONE -> BuildMode.CONSTRUCTION;
         };
-        
+
         String messageKey = switch (currentMode) {
             case CONSTRUCTION -> "message.satisfactory_build_tool.mode_construction";
             case DESTRUCTION -> "message.satisfactory_build_tool.mode_destruction";
@@ -139,7 +140,7 @@ public class BuildTool extends PickaxeItem {
         };
 
         player.displayClientMessage(Component.translatable(messageKey).withStyle(color), true);
-        
+
         if (currentMode == BuildMode.DESTRUCTION) {
             player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.destruction_mode_instruction").withStyle(ChatFormatting.YELLOW), false);
         } else if (currentMode == BuildMode.CLEAR) {
@@ -147,12 +148,25 @@ public class BuildTool extends PickaxeItem {
         }
         player.playSound(SoundEvents.UI_BUTTON_CLICK.value(), 0.5f, 1.0f);
     }
-    
+
     public static void setSelectedStructureIndex(int index) {
-        selectedStructureIndex = index;
-        if (Minecraft.getInstance().player != null) {
-            StructurePreview.updateFromCreativeOrb(Minecraft.getInstance().player);
+        setSelectedStructureIndexWithoutClientCall(index);
+        try {
+            // Tenta chamar o cliente apenas se estivermos no ambiente correto
+            Class<?> minecraftClass = Class.forName("net.minecraft.client.Minecraft");
+            Object instance = minecraftClass.getMethod("getInstance").invoke(null);
+            Object player = minecraftClass.getMethod("player").invoke(instance);
+            if (player != null) {
+                Class<?> structurePreviewClass = Class.forName("com.Infinity.Nexus.Satisfactory.BuildTool.utils.StructurePreview");
+                structurePreviewClass.getMethod("updateFromCreativeOrb", player.getClass()).invoke(null, player);
+            }
+        } catch (Exception e) {
+            // Ignora erros relacionados à classe do cliente não estar disponível
         }
+    }
+
+    public static void setSelectedStructureIndexWithoutClientCall(int index) {
+        selectedStructureIndex = index;
     }
 
 
@@ -168,35 +182,13 @@ public class BuildTool extends PickaxeItem {
 
         ItemStack itemstack = player.getItemInHand(hand);
 
-        // Modo Destruição - apenas no servidor
+        // Modo Destruição - agora manuseado no cliente
         if (currentMode == BuildMode.DESTRUCTION) {
             if (level.isClientSide) {
                 // No client, apenas consome o evento para evitar abrir a GUI
                 return InteractionResultHolder.success(itemstack);
             } else {
-                // Raycast for destruction
-                HitResult hit = player.pick(100.0D, 0.0F, false);
-                if (hit.getType() == HitResult.Type.BLOCK) {
-                    BlockHitResult blockHit = (BlockHitResult) hit;
-                    BlockPos pos = blockHit.getBlockPos();
-
-                    PlacedStructure structure = ClientStructureTracker.findStructureAt(pos, level);
-                    if (structure != null) {
-                        // Verifica cooldown para evitar cliques duplos
-                        long currentTime = System.currentTimeMillis();
-                        if (currentTime - lastDestructionTime < DESTRUCTION_COOLDOWN_MS) {
-                            // Ainda está no cooldown, ignora o clique
-                            return InteractionResultHolder.pass(itemstack);
-                        }
-                        
-                        // Atualiza o tempo do último uso
-                        lastDestructionTime = currentTime;
-                        
-                        ModMessages.sendToServer(new StructureDestroyC2SPacket(structure));
-                        player.swing(hand);
-                        return InteractionResultHolder.success(itemstack);
-                    }
-                }
+                // No servidor, apenas passa o evento pois o tratamento é feito no cliente
                 return InteractionResultHolder.pass(itemstack);
             }
         }
@@ -254,13 +246,19 @@ public class BuildTool extends PickaxeItem {
         int maxY = Math.max(data.point1.getY(), data.point2.getY());
         int maxZ = Math.max(data.point1.getZ(), data.point2.getZ());
         return pos.getX() >= minX && pos.getX() <= maxX &&
-               pos.getY() >= minY && pos.getY() <= maxY &&
-               pos.getZ() >= minZ && pos.getZ() <= maxZ;
+                pos.getY() >= minY && pos.getY() <= maxY &&
+                pos.getZ() >= minZ && pos.getZ() <= maxZ;
     }
 
     private void openClearModeScreen() {
-        if (Minecraft.getInstance().level != null && Minecraft.getInstance().player != null) {
-            Minecraft.getInstance().setScreen(new ClearModeScreen());
+        // Usar a classe cliente para abrir a tela
+        try {
+            Class.forName("com.Infinity.Nexus.Satisfactory.BuildTool.client.BuildToolClient");
+            // Chama o método estático para abrir a tela de limpeza
+            Class<?> clientClass = Class.forName("com.Infinity.Nexus.Satisfactory.BuildTool.client.BuildToolClient");
+            clientClass.getMethod("openClearModeScreen").invoke(null);
+        } catch (Exception e) {
+            // Ignora erros relacionados à classe do cliente não estar disponível
         }
     }
 
@@ -268,7 +266,7 @@ public class BuildTool extends PickaxeItem {
         HitResult hitResult = player.pick(100.0D, 0.0F, false);
 
         BlockPos clickedPos;
-        
+
         if (hitResult.getType() == HitResult.Type.BLOCK) {
             // Player is looking at a block - use that position
             BlockHitResult blockHit = (BlockHitResult) hitResult;
@@ -437,7 +435,15 @@ public class BuildTool extends PickaxeItem {
     }
 
     private void openBuildToolScreen() {
-        Minecraft.getInstance().setScreen(new BuildToolScreen());
+        // Usar a classe cliente para abrir a tela
+        try {
+            Class.forName("com.Infinity.Nexus.Satisfactory.BuildTool.client.BuildToolClient");
+            // Chama o método estático para abrir a tela principal
+            Class<?> clientClass = Class.forName("com.Infinity.Nexus.Satisfactory.BuildTool.client.BuildToolClient");
+            clientClass.getMethod("openBuildToolScreen").invoke(null);
+        } catch (Exception e) {
+            // Ignora erros relacionados à classe do cliente não estar disponível
+        }
     }
 
     private InteractionResultHolder<ItemStack> placeStructure(Player player, ItemStack itemstack) {
@@ -556,7 +562,7 @@ public class BuildTool extends PickaxeItem {
         }
         return availableStructures.get(selectedStructureIndex);
     }
-
+    /**
     @Override
     public void appendHoverText(ItemStack stack, TooltipContext context, List<Component> tooltip, TooltipFlag tooltipFlag) {
         if(Config.enable_creativity_orb) {
@@ -585,10 +591,10 @@ public class BuildTool extends PickaxeItem {
                 StructureLoader.StructureData structure = getSelectedStructure();
                 tooltip.add(Component.translatable("tooltip.infinity_nexus.creativity_structure", structure.getName()).withStyle(ChatFormatting.YELLOW));
                 tooltip.add(Component.translatable("tooltip.infinity_nexus.creativity_size", structure.getWidth(), structure.getLength(), structure.getHeight()).withStyle(ChatFormatting.GREEN));
-                
+
                 // Tier and Cost Info
                 if (structure.getTier() > 0) {
-                     tooltip.add(Component.translatable("tooltip.satisfactory_build_tool.tier", structure.getTier()).withStyle(ChatFormatting.GOLD));
+                    tooltip.add(Component.translatable("tooltip.satisfactory_build_tool.tier", structure.getTier()).withStyle(ChatFormatting.GOLD));
                 }
                 if (structure.isOnlyItems()) {
                     tooltip.add(Component.translatable("tooltip.satisfactory_build_tool.only_items_required", structure.isOnlyItems()).withStyle(ChatFormatting.BLUE));
@@ -609,22 +615,23 @@ public class BuildTool extends PickaxeItem {
 
         super.appendHoverText(stack, context, tooltip, tooltipFlag);
     }
+    **/
 
     public static int getColor(ItemStack stack) {
-        return stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY)
+        return stack.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY)
                 .copyTag().getInt("Color");
     }
 
     public static void setColor(ItemStack stack, int color) {
-        net.minecraft.world.item.component.CustomData.update(net.minecraft.core.component.DataComponents.CUSTOM_DATA, stack, tag -> tag.putInt("Color", color));
+        CustomData.update(DataComponents.CUSTOM_DATA, stack, tag -> tag.putInt("Color", color));
     }
-    
+
     public static String getMaterial(ItemStack stack) {
-        return stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY)
+        return stack.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY)
                 .copyTag().getString("Material");
     }
 
     public static void setMaterial(ItemStack stack, String materialName) {
-        net.minecraft.world.item.component.CustomData.update(net.minecraft.core.component.DataComponents.CUSTOM_DATA, stack, tag -> tag.putString("Material", materialName));
+        CustomData.update(DataComponents.CUSTOM_DATA, stack, tag -> tag.putString("Material", materialName));
     }
 }

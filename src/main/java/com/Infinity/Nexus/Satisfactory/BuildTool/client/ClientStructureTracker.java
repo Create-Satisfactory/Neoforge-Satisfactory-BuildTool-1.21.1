@@ -122,4 +122,18 @@ public class ClientStructureTracker {
         }
         return null;
     }
+    
+    public static PlacedStructure findStructureContaining(BlockPos pos, Level level) {
+        ResourceKey<Level> dimKey = level.dimension();
+        for (PlacedStructure s : placedStructures) {
+            if (s.level().equals(dimKey)) {
+                if (pos.getX() >= s.minPos().getX() && pos.getX() <= s.maxPos().getX() &&
+                    pos.getY() >= s.minPos().getY() && pos.getY() <= s.maxPos().getY() &&
+                    pos.getZ() >= s.minPos().getZ() && pos.getZ() <= s.maxPos().getZ()) {
+                    return s;
+                }
+            }
+        }
+        return null;
+    }
 }

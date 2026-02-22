@@ -403,10 +403,14 @@ public class PlaceStructure {
                 player.gameMode.destroyBlock(pos);
             }
             if (!isCreative) {
-                if (findBlockInInventory(targetBlock, player).isEmpty()) return false;
+                // Procurar o item correto no inventário baseado no bloco necessário
+                if (!hasBlockInInventory(targetBlock, player)) return false;
             }
             return placeBlockAsPlayer(targetState, pos, player, level, isCreative);
-        } catch (Exception e) { return false; }
+        } catch (Exception e) { 
+            SatisfactoryBuildTool.LOGGER.error("Error trying to place block at " + pos + ": " + e.getMessage());
+            return false; 
+        }
     }
 
     private static ItemStack findBlockInInventory(Block block, ServerPlayer player) {
@@ -415,6 +419,20 @@ public class PlaceStructure {
             if (Block.byItem(stack.getItem()) == block) return stack;
         }
         return ItemStack.EMPTY;
+    }
+    
+    private static boolean hasBlockInInventory(Block block, ServerPlayer player) {
+        int needed = 1; // We need at least 1 block
+        int found = 0;
+        
+        for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
+            ItemStack stack = player.getInventory().getItem(i);
+            if (Block.byItem(stack.getItem()) == block) {
+                found += stack.getCount();
+                if (found >= needed) return true;
+            }
+        }
+        return false;
     }
 
     private static boolean placeBlockAsPlayer(BlockState targetState, BlockPos pos, ServerPlayer player, ServerLevel level, boolean isCreative) {

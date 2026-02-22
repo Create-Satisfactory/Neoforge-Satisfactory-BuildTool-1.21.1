@@ -33,34 +33,133 @@ public class StructureDestroyer {
     private static final Queue<ClearTask> CLEAR_QUEUE = new ArrayDeque<>();
 
     public static void destroyStructure(ServerPlayer player, PlacedStructure placed) {
-        if (!BuildTool.isDestructionMode()) {
-        }
+        SatisfactoryBuildTool.LOGGER.info("Attempting to destroy structure: {} at position {} with rotation {}", 
+                placed.structureName(), placed.startPos(), placed.rotation());
+        
+        // No need to check BuildTool.isDestructionMode() here since the client should only send this packet when in destruction mode
+        // The validation happens based on the structure data received from the client
 
         StructureLoader.StructureData structureData = StructureLoader.getServerStructure(placed.structureName());
         if (structureData == null) {
             structureData = StructureLoader.getClientStructure(placed.structureName());
         }
 
-        if (structureData == null) {
-            player.displayClientMessage(Component.translatable("error.satisfactory_build_tool.structure_data_not_found").withStyle(ChatFormatting.RED), true);
-            return;
-        }
-
         ServerLevel level = player.serverLevel();
-        if (!validateIntegrity(level, placed, structureData)) {
-            player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.structure_integrity_failed").withStyle(net.minecraft.ChatFormatting.RED), true);
-            return;
+        
+        // If structure data is not found, we can still allow destruction for placed structures
+        // This handles cases where a player created a structure with a blueprint that's no longer available
+        if (structureData == null) {
+            SatisfactoryBuildTool.LOGGER.info("Structure data not found, creating minimal structure data for destruction");
+            // Create a minimal structure data for destruction purposes only
+            structureData = new StructureLoader.StructureData(
+                placed.structureName(),
+                "Unknown", // author
+                "Structure blueprint no longer available", // description
+                "unknown", // category
+                "Unknown > Unknown", // guiPath
+                "", // iconPath
+                0, // tier
+                "", // subtier
+                0, // energyConsumption
+                true, // onlyItems (default to true to ensure blocks are destroyed with drops)
+                new ArrayList<>(), // requiredItems
+                new ArrayList<>() // pattern
+            );
+            
+            // Proceed with destruction setting blocks as air when structure data is not originally available
+        } else {
+            boolean integrityValid = validateIntegrity(level, placed, structureData);
+            SatisfactoryBuildTool.LOGGER.info("Structure integrity validation result: {}, original onlyItems: {}", integrityValid, structureData.isOnlyItems());
+            
+            // Modify the onlyItems property based on integrity validation
+            // If integrity is valid (structure intact), set to true (destroy with gameMode for drops)
+            // If integrity is invalid (structure not intact), set to false (destroy as air)
+            boolean adjustedOnlyItems = integrityValid; // When integrity is valid, use gameMode (true), when invalid, set as air (false)
+            
+            // Create a temporary structure data with adjusted onlyItems value
+            structureData = new StructureLoader.StructureData(
+                structureData.getName(),
+                structureData.getAuthor(),
+                structureData.getDescription(),
+                structureData.getCategory(),
+                structureData.getGuiPath(),
+                structureData.getIconPath(),
+                structureData.getTier(),
+                structureData.getSubtier(),
+                structureData.getEnergyConsumption(),
+                adjustedOnlyItems,
+                structureData.getRequiredItems(),
+                structureData.getPattern()
+            );
+            
+            SatisfactoryBuildTool.LOGGER.info("Adjusted onlyItems based on integrity: {}", adjustedOnlyItems);
         }
 
         ModMessages.sendToPlayer(new StructureRemoveS2CPacket(placed.id()), player);
+        SatisfactoryBuildTool.LOGGER.info("Sending structure removal packet and proceeding with destruction");
         refundAndDestroy(player, level, placed, structureData);
     }
 
     private static boolean validateIntegrity(ServerLevel level, PlacedStructure placed, StructureLoader.StructureData structure) {
-        return true; 
+        // Check if the structure pattern still matches the current world state
+        Direction direction = StructureGeometryHelper.getDirectionFromYaw(placed.rotation());
+        BlockPos startPos = placed.startPos();
+        int width = structure.getWidth();
+        int height = structure.getHeight();
+        int length = structure.getLength();
+        
+        // Verify if all blocks in the structure pattern still match the current world state
+        for (int y = 0; y < height; y++) {
+            if (y >= structure.getPattern().size()) continue;
+            var layer = structure.getPattern().get(y);
+            for (int z = 0; z < length; z++) {
+                if (z >= layer.size()) continue;
+                var row = layer.get(z);
+                for (int x = 0; x < width; x++) {
+                    if (x >= row.size()) continue;
+                    
+                    String blockStr = row.get(x);
+                    if (blockStr.equals(" ") || blockStr.isEmpty()) continue;
+
+                    BlockPos targetPos = StructureGeometryHelper.getRotatedBlockPos(startPos, x, y, z, width, length, direction);
+                    BlockState worldState = level.getBlockState(targetPos);
+                    
+                    // Parse the expected block from the structure pattern
+                    Block expectedBlock = parseBlockFromStructureString(blockStr);
+                    if (expectedBlock == null) {
+                        SatisfactoryBuildTool.LOGGER.warn("Could not parse block from structure string: {}", blockStr);
+                        continue;
+                    }
+                    
+                    // Check if the current block matches the expected block
+                    if (worldState.getBlock() != expectedBlock) {
+                        SatisfactoryBuildTool.LOGGER.info("Structure integrity failed at pos {}: expected {}, got {}", targetPos, expectedBlock, worldState.getBlock());
+                        return false; // Structure integrity failed
+                    }
+                }
+            }
+        }
+        
+        return true; // All blocks matched the expected pattern
+    }
+    
+    private static Block parseBlockFromStructureString(String blockStr) {
+        // Handle the case where the structure string contains block IDs
+        // Format might be like: "minecraft:stone", "modid:block_name", etc.
+        try {
+            ResourceLocation blockId = ResourceLocation.parse(blockStr);
+            return BuiltInRegistries.BLOCK.get(blockId);
+        } catch (Exception e) {
+            // If parsing fails, try to find block by legacy method
+            return BuiltInRegistries.BLOCK.stream()
+                    .filter(block -> BuiltInRegistries.BLOCK.getKey(block).toString().toLowerCase().contains(blockStr.toLowerCase()))
+                    .findFirst()
+                    .orElse(null);
+        }
     }
 
     private static void refundAndDestroy(ServerPlayer player, ServerLevel level, PlacedStructure placed, StructureLoader.StructureData structure) {
+        SatisfactoryBuildTool.LOGGER.info("Starting refundAndDestroy for structure: {} with onlyItems: {}", structure.getName(), structure.isOnlyItems());
         Direction direction = StructureGeometryHelper.getDirectionFromYaw(placed.rotation());
         int width = structure.getWidth();
         int length = structure.getLength();
@@ -99,10 +198,13 @@ public class StructureDestroyer {
                     BlockState worldState = level.getBlockState(targetPos);
                     
                     if (!worldState.isAir()) {
-                         if (!dropBlocks) {
-                             player.gameMode.destroyBlock(targetPos);
+                        SatisfactoryBuildTool.LOGGER.info("Attempting to destroy block at {}: dropBlocks={}, block={}", targetPos, dropBlocks, worldState.getBlock().getName().getString());
+                         if (dropBlocks) {
+                             boolean destroyed = player.gameMode.destroyBlock(targetPos);
+                             SatisfactoryBuildTool.LOGGER.info("Block destroyed with gameMode: {} at {}", destroyed, targetPos);
                          }else {
-                             level.setBlock(targetPos, Blocks.AIR.defaultBlockState(), 3);
+                             boolean set = level.setBlock(targetPos, Blocks.AIR.defaultBlockState(), 3);
+                             SatisfactoryBuildTool.LOGGER.info("Block set to air: {} at {}", set, targetPos);
                          }
                     }
                 }

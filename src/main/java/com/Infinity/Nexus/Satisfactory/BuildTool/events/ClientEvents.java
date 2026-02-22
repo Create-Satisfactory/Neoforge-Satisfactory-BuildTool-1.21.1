@@ -3,6 +3,7 @@ package com.Infinity.Nexus.Satisfactory.BuildTool.events;
 import com.Infinity.Nexus.Satisfactory.BuildTool.config.Config;
 import com.Infinity.Nexus.Satisfactory.BuildTool.item.BuildTool;
 import com.Infinity.Nexus.Satisfactory.BuildTool.utils.StructurePreview;
+import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.player.Player;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -22,7 +23,7 @@ public class ClientEvents {
             if (player.getMainHandItem().getItem() instanceof BuildTool ||
                     player.getOffhandItem().getItem() instanceof BuildTool) {
                 StructurePreview.updatePreviewPosition(player);
-                BuildTool.onPlayerTick(player);
+                BuildTool.onPlayerTick(Minecraft.getInstance().player);
             }
         }
     }
