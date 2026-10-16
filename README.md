@@ -144,15 +144,15 @@ Use the `"schematics"` array with `"MaterialName:filename.nbt"` entries to map d
 Progression is shared across the entire FTB Team. Whenever a building or material is unlocked, it is automatically synced to every online member of the team.
 You can wire up unlocks using any of the three methods below:
 
-# Method A: Via "subtier" and "tier" in the Building .json
+#### Method A: Via "subtier" and "tier" in the Building .json
 - Unlock by Milestone Title or Quest ID: Set "subtier" in your structure .json to match either the exact Title of an FTB Quest (e.g., "subtier": "Part Assembly") or its FTB Quest Hex ID (e.g., "subtier": "4B9F2A10"). As soon as any teammate completes that quest, the structure unlocks for the whole team.
 - Unlock by Chapter Tier: If "subtier" is left blank ("") and "tier" is greater than 0 (e.g., "tier": 2), the structure unlocks as soon as any quest inside an FTB Quests Chapter containing "Tier 2" in its title is unlocked or completed.
-# Method B: Via FTB Quest Tags (In-Game Editor — No JSON Edits Needed)In /ftbquests editing_mode, right-click any Quest -> Edit -> add one or more Tags:
+#### Method B: Via FTB Quest Tags (In-Game Editor — No JSON Edits Needed)In /ftbquests editing_mode, right-click any Quest -> Edit -> add one or more Tags:
 FTB Quest TagEffect When Quest Completes
 `unlock:<building_name>` Unlocks that building for the team (case-insensitive, spaces or underscores). Example: unlock:constructor or unlock:foundation_4m
 `unlock_material:<Material>` Unlocks a Customizer material in Customizer > Materials. Example: unlock_material:Concrete
 `<custom_subtier_tag>` Unlocks every building whose .json has "subtier": "<custom_subtier_tag>".
-# Method C: Via Commands or FTB Quest Command Rewards
+#### Method C: Via Commands or FTB Quest Command Rewards
 Use the /structure progression commands (requires OP permission level 2, or an FTB Quest Command Reward with Run as Server enabled):
 ```
 # Unlock a specific structure for the player's entire FTB Team
@@ -176,8 +176,8 @@ Use the /structure progression commands (requires OP permission level 2, or an F
 # Hot-reload all server/datapack structure JSONs & .nbt schematics and re-sync online players
 /structure progression reload
 ```
-<FollowUp>
+
+# TODO:
 * Implement Copycat NBT recoloring and Primary + Secondary dual-tone swatches in `PlaceStructure`, `StructurePreview`, and `BuildToolScreen`
 * Add per-material recipe cost overrides to `StructureLoader` so each material variant in `"schematics"` can define its own item cost
 * Add a FICSIT "New Buildings Unlocked" HUD notification banner when an FTB Quest unlocks new schematics
-</FollowUp>
