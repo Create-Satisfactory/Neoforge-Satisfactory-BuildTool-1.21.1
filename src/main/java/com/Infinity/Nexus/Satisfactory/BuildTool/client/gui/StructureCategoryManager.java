@@ -6,36 +6,28 @@ import com.Infinity.Nexus.Satisfactory.BuildTool.utils.StructureLoader;
 import java.util.*;
 import java.util.stream.Collectors;
 
-/**
- * Utilitário para gerenciamento de categorias e estruturas na interface
- */
 public class StructureCategoryManager {
-    
-    private Map<String, List<StructureLoader.StructureData>> categorizedStructures = new HashMap<>();
+
+    private final Map<String, List<StructureLoader.StructureData>> categorizedStructures = new HashMap<>();
     private List<String> categories = new ArrayList<>();
-    private Map<String, List<String>> subCategories = new HashMap<>();
-    
-    /**
-     * Parseia e organiza as estruturas em categorias
-     */
+    private final Map<String, List<String>> subCategories = new HashMap<>();
+
     public void parseStructures(Collection<StructureLoader.StructureData> structures) {
         categorizedStructures.clear();
         categories.clear();
         subCategories.clear();
-        
+
         for (StructureLoader.StructureData structure : structures) {
-            // SECURITY FIX: Only include server-side official structures in these categories
-            if (!structure.isServerStructure()) {
+            // Exclude player-saved custom blueprints from the official Builder tab
+            if ("custom".equalsIgnoreCase(structure.getCategory()) && !structure.isServerStructure()) {
                 continue;
             }
-            
+
             String guiPath = structure.getGuiPath();
             String mainCategory = guiPath;
             String subCategory = null;
-            
-            // Support both "/" and ">" as separators
+
             String separator = guiPath.contains(">") ? ">" : (guiPath.contains("/") ? "/" : null);
-            
             if (separator != null) {
                 String[] parts = guiPath.split(separator);
                 mainCategory = parts[0].trim();
@@ -43,8 +35,8 @@ public class StructureCategoryManager {
                     subCategory = parts[1].trim();
                 }
             }
-            
-            if (subCategory != null) {
+
+            if (subCategory != null && !subCategory.isEmpty()) {
                 String fullPath = mainCategory + " > " + subCategory;
                 categorizedStructures.computeIfAbsent(fullPath, k -> new ArrayList<>()).add(structure);
                 List<String> subs = subCategories.computeIfAbsent(mainCategory, k -> new ArrayList<>());
@@ -55,21 +47,16 @@ public class StructureCategoryManager {
                 categorizedStructures.computeIfAbsent(mainCategory, k -> new ArrayList<>()).add(structure);
             }
         }
-        
+
         organizeCategories();
     }
-    
-    /**
-     * Organiza as categorias seguindo a ordem de configuração
-     */
+
     private void organizeCategories() {
-        // Sort categories alphabetically first
         categories = new ArrayList<>(categorizedStructures.keySet().stream()
                 .map(s -> s.contains(" > ") ? s.split(" > ")[0] : s)
                 .distinct()
                 .collect(Collectors.toList()));
-        
-        // Sort categories by config order, then alphabetically for unknown ones
+
         List<String> order = Config.category_order;
         categories.sort((a, b) -> {
             int indexA = order.indexOf(a);
@@ -79,71 +66,42 @@ public class StructureCategoryManager {
             if (indexB != -1) return 1;
             return a.compareToIgnoreCase(b);
         });
-        
-        // Sort subcategories
+
         for (List<String> subs : subCategories.values()) {
             subs.sort(String::compareToIgnoreCase);
         }
     }
-    
-    /**
-     * Obtém estruturas filtradas por categoria e busca
-     */
-    public List<StructureLoader.StructureData> getFilteredStructures(String category, String searchTerm) {
-        List<StructureLoader.StructureData> result = new ArrayList<>();
-        
-        if (category == null) return result;
-        
-        // Get structures for this category (and subcategories)
-        List<StructureLoader.StructureData> categoryStructures = categorizedStructures.getOrDefault(category, new ArrayList<>());
-        result.addAll(categoryStructures);
-        
-        // Also include subcategories
-        List<String> subs = subCategories.getOrDefault(category, new ArrayList<>());
-        for (String sub : subs) {
-            String subPath = category + " > " + sub;
-            result.addAll(categorizedStructures.getOrDefault(subPath, new ArrayList<>()));
+
+    public List<StructureLoader.StructureData> getFilteredStructures(String categoryOrPath, String searchTerm) {
+        if (categoryOrPath == null) return Collections.emptyList();
+
+        List<StructureLoader.StructureData> result = new ArrayList<>(
+                categorizedStructures.getOrDefault(categoryOrPath, Collections.emptyList())
+        );
+
+        // Only aggregate subcategories if a top-level category (without " > ") was requested directly
+        if (!categoryOrPath.contains(" > ")) {
+            for (String sub : subCategories.getOrDefault(categoryOrPath, Collections.emptyList())) {
+                String subPath = categoryOrPath + " > " + sub;
+                result.addAll(categorizedStructures.getOrDefault(subPath, Collections.emptyList()));
+            }
         }
-        
-        // Apply search filter
+
         if (searchTerm != null && !searchTerm.isEmpty()) {
             String lowerSearch = searchTerm.toLowerCase();
             result = result.stream()
                     .filter(s -> s.getName().toLowerCase().contains(lowerSearch) ||
-                               s.getDescription().toLowerCase().contains(lowerSearch))
+                            s.getDescription().toLowerCase().contains(lowerSearch))
                     .collect(Collectors.toList());
         }
-        
         return result;
     }
-    
-    /**
-     * Obtém todas as categorias principais ordenadas
-     */
+
     public List<String> getCategories() {
         return new ArrayList<>(categories);
     }
-    
-    /**
-     * Obtém subcategorias de uma categoria específica
-     */
+
     public List<String> getSubCategories(String category) {
-        return new ArrayList<>(subCategories.getOrDefault(category, new ArrayList<>()));
-    }
-    
-    /**
-     * Verifica se uma categoria tem subcategorias
-     */
-    public boolean hasSubCategories(String category) {
-        return subCategories.containsKey(category) && !subCategories.get(category).isEmpty();
-    }
-    
-    /**
-     * Limpa todos os dados
-     */
-    public void clear() {
-        categorizedStructures.clear();
-        categories.clear();
-        subCategories.clear();
+        return new ArrayList<>(subCategories.getOrDefault(category, Collections.emptyList()));
     }
 }

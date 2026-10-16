@@ -9,6 +9,7 @@ import com.google.gson.reflect.TypeToken;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonWriter;
 
+import java.util.List;
 import java.util.Optional;
 
 import java.io.File;
@@ -58,26 +59,9 @@ public class StructureFileManager {
         File dir = directory.toFile();
         return dir.listFiles((d, name) -> name.toLowerCase().endsWith(".json"));
     }
-    
-    /**
-     * Carrega uma estrutura de um arquivo JSON
-     */
+
     public StructureLoader.StructureData loadStructureFromFile(File file) {
-        try (FileReader reader = new FileReader(file)) {
-            StructureLoader.StructureData structure = gson.fromJson(reader, StructureLoader.StructureData.class);
-            
-            if (structure != null && structure.isValid()) {
-                // Pré-processa os estados dos blocos para melhor performance
-                structure.preprocessBlockStates();
-                return structure;
-            } else {
-                SatisfactoryBuildTool.LOGGER.error("Invalid structure in file: {}", file.getName());
-                return null;
-            }
-        } catch (Exception e) {
-            SatisfactoryBuildTool.LOGGER.error("Error reading structure file: {}", file.getName(), e);
-            return null;
-        }
+        return StructureLoader.loadStructureFromFile(file, null);
     }
     
     /**
@@ -86,19 +70,23 @@ public class StructureFileManager {
     public boolean saveStructureToFile(StructureLoader.StructureData structure, Path directory) {
         return saveStructureToFile(structure, directory, structure.getName().toLowerCase());
     }
-    
-    /**
-     * Salva uma estrutura em um arquivo JSON com nome específico
-     */
+
     public boolean saveStructureToFile(StructureLoader.StructureData structure, Path directory, String fileNameWithoutExtension) {
         try {
             ensureDirectoryExists(directory, "save");
-            
+
+            String nbtFileName = fileNameWithoutExtension + ".nbt";
+            if (structure.getSchematics().isEmpty()) {
+                structure.setSchematics(List.of("Default:" + nbtFileName));
+            }
+
+            if (structure.getPattern() != null && !structure.getPattern().isEmpty()) {
+                SchematicNbtHelper.writePatternToNbtFile(structure.getPattern(), directory.resolve(nbtFileName));
+            }
+
             Path filePath = directory.resolve(fileNameWithoutExtension + ".json");
             String json = gson.toJson(structure);
-            
             Files.write(filePath, json.getBytes());
-            SatisfactoryBuildTool.LOGGER.info("Saved structure to: {}", filePath.toString());
             return true;
         } catch (Exception e) {
             SatisfactoryBuildTool.LOGGER.error("Failed to save structure: {}", structure.getName(), e);

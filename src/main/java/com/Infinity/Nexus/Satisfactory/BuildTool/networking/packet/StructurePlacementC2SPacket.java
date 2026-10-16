@@ -87,27 +87,12 @@ public record StructurePlacementC2SPacket(
             }
 
             // SERVER-SIDE UNLOCK CHECK: Verify if the player has unlocked this structure
-            if (isOfficial) {
-                PlayerProgression progression = ProgressionHandler.getProgression(player.getUUID());
-                boolean hasUnlocked = progression.isStructureUnlocked(structureData.getName());
-
-                // Also check if they meet the tier requirements (auto-unlock for Tier > 0)
-                if (!hasUnlocked && structureData.getTier() > 0) {
-                    if (progression.getTier() >= structureData.getTier()) {
-                        if (structureData.getSubtier() == null || structureData.getSubtier().isEmpty() ||
-                                progression.hasCompletedSubtier(structureData.getSubtier())) {
-                            hasUnlocked = true;
-                        }
-                    }
-                }
-
-                if (!hasUnlocked) {
-                    SatisfactoryBuildTool.LOGGER.warn("Player {} tried to place locked structure: {}", player.getName().getString(), structureData.getName());
-                    player.sendSystemMessage(Component.translatable(
-                            "message.satisfactory_build_tool.error_structure_locked"
-                    ).withStyle(ChatFormatting.RED));
-                    return;
-                }
+            if (isOfficial && !ProgressionHandler.isStructureUnlocked(player, structureData)) {
+                SatisfactoryBuildTool.LOGGER.warn("Player {} tried to place locked structure: {}", player.getName().getString(), structureData.getName());
+                player.sendSystemMessage(Component.translatable(
+                        "message.satisfactory_build_tool.error_structure_locked"
+                ).withStyle(ChatFormatting.RED));
+                return;
             }
 
             if (structureData != null && structureData.isValid()) {

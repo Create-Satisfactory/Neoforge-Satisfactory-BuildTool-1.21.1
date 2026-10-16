@@ -39,7 +39,7 @@ public class Config {
 
     public static final ModConfigSpec.BooleanValue ENABLE_CLEAR_MODE = BUILDER
             .comment("true = enable CLEAR mode, false = disable")
-            .define("enable_clear_mode", true);
+            .define("enable_clear_mode", false);
 
     public static final ModConfigSpec.BooleanValue ALLOW_OBSTRUCTION_CLEARING = BUILDER
             .comment("true = automatically clear obstructions when placing structure, false = prevent placement")

@@ -93,7 +93,7 @@
   "message.satisfactory_build_tool.mode_none": "Standby Mode (None)",
   "message.satisfactory_build_tool.structure_destroyed": "Structure destroyed successfully!",
   "message.satisfactory_build_tool.structure_integrity_failed": "Structure integrity check failed!",
-  "message.satisfactory_build_tool.destruction_mode_instruction": "Right-Click a structure with the Build Tool to dismantle it.",
+  "message.satisfactory_build_tool.destruction_mode_instruction": "%s a structure with the Build Tool to dismantle it.",
   "gui.satisfactory_build_tool.no_custom_structures": "No custom structures yet",
   "gui.satisfactory_build_tool.close_button": "X",
   "error.satisfactory_build_tool.structure_data_not_found": "Structure data not found on server",

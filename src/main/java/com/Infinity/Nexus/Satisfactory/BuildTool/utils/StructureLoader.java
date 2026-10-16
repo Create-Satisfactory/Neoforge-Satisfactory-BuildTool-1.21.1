@@ -1,63 +1,54 @@
 package com.Infinity.Nexus.Satisfactory.BuildTool.utils;
 
 import com.Infinity.Nexus.Satisfactory.BuildTool.SatisfactoryBuildTool;
-import com.Infinity.Nexus.Satisfactory.BuildTool.config.Config;
+import com.Infinity.Nexus.Satisfactory.BuildTool.progression.ProgressionHandler;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.TypeAdapter;
 import com.google.gson.TypeAdapterFactory;
+import com.google.gson.annotations.SerializedName;
 import com.google.gson.reflect.TypeToken;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonWriter;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.packs.resources.Resource;
+import net.minecraft.server.packs.resources.ResourceManager;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
+import net.neoforged.neoforge.server.ServerLifecycleHooks;
+import org.jetbrains.annotations.Nullable;
 
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
-import java.util.Objects;
 
 public class StructureLoader {
-    // Create Gson with custom adapters to handle Optional and other problematic types
     private static final Gson GSON = new GsonBuilder()
             .setPrettyPrinting()
             .registerTypeAdapterFactory(new OptionalTypeAdapterFactory())
             .create();
 
-    private static final Map<String, StructureData> SERVER_STRUCTURES = new HashMap<>(); // Master list (Server)
-    private static final Map<String, StructureData> SYNCED_STRUCTURES = new HashMap<>(); // Official synced (Client)
-    private static final Map<String, StructureData> LOCAL_STRUCTURES = new HashMap<>();  // Blueprints (Client)
-    
-    // Paths
+    private static final Map<String, StructureData> SERVER_STRUCTURES = new HashMap<>();
+    private static final Map<String, StructureData> SYNCED_STRUCTURES = new HashMap<>();
+    private static final Map<String, StructureData> LOCAL_STRUCTURES = new HashMap<>();
+
     private static final Path SERVER_STRUCTURES_DIR = Paths.get("config/InfinityNexus/structures/server");
     private static final Path CLIENT_STRUCTURES_DIR = Paths.get("config/InfinityNexus/structures/client");
 
-    /**
-     * Custom TypeAdapterFactory to handle Optional types
-     */
     private static class OptionalTypeAdapterFactory implements TypeAdapterFactory {
         @Override
         @SuppressWarnings("unchecked")
         public <T> TypeAdapter<T> create(Gson gson, TypeToken<T> typeToken) {
-            if (typeToken.getRawType() != Optional.class) {
-                return null;
-            }
-
+            if (typeToken.getRawType() != Optional.class) return null;
             return (TypeAdapter<T>) new OptionalTypeAdapter<>(gson, typeToken);
         }
     }
 
-    /**
-     * Custom TypeAdapter for Optional
-     */
     private static class OptionalTypeAdapter<T> extends TypeAdapter<Optional<T>> {
         private final Gson gson;
         private final TypeToken<T> typeToken;
@@ -83,190 +74,193 @@ public class StructureLoader {
         }
     }
 
-    /**
-     * Carrega todas as estruturas da pasta de estruturas DO SERVIDOR
-     * Deve ser chamado apenas no Server Side (ou CommonSetup se for Dedicated, mas agora é ServerStarting)
-     */
     public static void loadStructures() {
-        SERVER_STRUCTURES.clear();
+        ResourceManager rm = ServerLifecycleHooks.getCurrentServer() != null
+                ? ServerLifecycleHooks.getCurrentServer().getResourceManager()
+                : null;
+        loadStructures(rm);
+    }
 
+    public static void loadStructures(ResourceManager resourceManager) {
+        SERVER_STRUCTURES.clear();
+        int loadedCount = 0;
+
+        // 1. Load built-in Mod & Datapack structures (data/<namespace>/structures/*.json)
+        if (resourceManager != null) {
+            Map<ResourceLocation, Resource> resources = resourceManager.listResources(
+                    "structures",
+                    loc -> loc.getPath().endsWith(".json") &&
+                            (loc.getNamespace().equals(SatisfactoryBuildTool.MOD_ID) || loc.getNamespace().equals("satisfactory"))
+            );
+
+            for (Map.Entry<ResourceLocation, Resource> entry : resources.entrySet()) {
+                try (Reader reader = new InputStreamReader(entry.getValue().open(), StandardCharsets.UTF_8)) {
+                    StructureData structure = GSON.fromJson(reader, StructureData.class);
+                    if (structure != null) {
+                        structure.loadSchematics(null, entry.getKey(), resourceManager);
+                        if (structure.isValid()) {
+                            structure.setFileName(entry.getKey().getPath());
+                            structure.setFromServer(true);
+                            structure.preprocessBlockStates();
+                            SERVER_STRUCTURES.put(structure.getName().toLowerCase(), structure);
+                            loadedCount++;
+                        }
+                    }
+                } catch (Exception e) {
+                    SatisfactoryBuildTool.LOGGER.error("Error loading datapack structure {}: {}", entry.getKey(), e.getMessage());
+                }
+            }
+        }
+
+        // 2. Load config/InfinityNexus/structures/server/*.json
         try {
             if (!Files.exists(SERVER_STRUCTURES_DIR)) {
                 Files.createDirectories(SERVER_STRUCTURES_DIR);
-                SatisfactoryBuildTool.LOGGER.info("Diretório de estruturas do servidor criado: {}", SERVER_STRUCTURES_DIR.toString());
-                return;
             }
 
             File structuresDir = SERVER_STRUCTURES_DIR.toFile();
             File[] structureFiles = structuresDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".json"));
 
-            if (structureFiles == null || structureFiles.length == 0) {
-                SatisfactoryBuildTool.LOGGER.warn("Nenhuma estrutura encontrada em: {}. Gerando template...", SERVER_STRUCTURES_DIR.toString());
+            if ((structureFiles == null || structureFiles.length == 0) && SERVER_STRUCTURES.isEmpty()) {
                 createDefaultTemplate();
                 structureFiles = structuresDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".json"));
-                if (structureFiles == null || structureFiles.length == 0) return;
             }
 
-            int loadedCount = 0;
-            for (File file : structureFiles) {
-                try {
-                    StructureData structure = loadStructureFromFile(file);
+            if (structureFiles != null) {
+                for (File file : structureFiles) {
+                    StructureData structure = loadStructureFromFile(file, resourceManager);
                     if (structure != null) {
-                        structure.setFromServer(true); // Mark as official
+                        structure.setFromServer(true);
                         SERVER_STRUCTURES.put(structure.getName().toLowerCase(), structure);
                         loadedCount++;
-                        SatisfactoryBuildTool.LOGGER.info("Server Structure loaded: {} ({}x{}x{})",
-                                structure.getName(), structure.getWidth(), structure.getHeight(), structure.getLength());
+                        SatisfactoryBuildTool.LOGGER.info("Server Structure loaded: {} ({}x{}x{}) with {} material schematics",
+                                structure.getName(), structure.getWidth(), structure.getHeight(), structure.getLength(),
+                                structure.getMaterialPatterns().size());
                     }
-                } catch (Exception e) {
-                    SatisfactoryBuildTool.LOGGER.error("Error loading server structure from file: {}", file.getName(), e);
                 }
             }
-
-            SatisfactoryBuildTool.LOGGER.info("Loaded {} server structures", loadedCount);
-
+            SatisfactoryBuildTool.LOGGER.info("Loaded {} total server structures", loadedCount);
         } catch (IOException e) {
             SatisfactoryBuildTool.LOGGER.error("Error accessing server structures directory", e);
         }
     }
 
     /**
-     * Gera um arquivo de template com todas as variáveis possíveis para referência do usuário.
+     * Generates a default template demonstrating the "schematics": ["Material:file.nbt"] array format.
      */
     private static void createDefaultTemplate() {
         try {
-            List<RequiredItem> items = new ArrayList<>();
-            items.add(new RequiredItem("minecraft:stone", 4));
-            items.add(new RequiredItem("minecraft:iron_ingot", 2));
+            List<RequiredItem> items = List.of(
+                    new RequiredItem("minecraft:stone", 4),
+                    new RequiredItem("minecraft:iron_ingot", 2)
+            );
 
-            List<List<List<String>>> pattern = new ArrayList<>();
-            List<List<String>> layer = new ArrayList<>();
-            List<String> row = new ArrayList<>();
-            row.add("minecraft:stone");
-            row.add("minecraft:stone");
-            row.add("minecraft:stone");
-            layer.add(new ArrayList<>(row));
-            layer.add(new ArrayList<>(row));
-            layer.add(new ArrayList<>(row));
-            pattern.add(layer);
+            List<List<List<String>>> stonePattern = List.of(
+                    List.of(
+                            List.of("minecraft:stone", "minecraft:stone", "minecraft:stone"),
+                            List.of("minecraft:stone", "minecraft:stone", "minecraft:stone"),
+                            List.of("minecraft:stone", "minecraft:stone", "minecraft:stone")
+                    )
+            );
+
+            List<List<List<String>>> concretePattern = List.of(
+                    List.of(
+                            List.of("minecraft:gray_concrete", "minecraft:gray_concrete", "minecraft:gray_concrete"),
+                            List.of("minecraft:gray_concrete", "minecraft:gray_concrete", "minecraft:gray_concrete"),
+                            List.of("minecraft:gray_concrete", "minecraft:gray_concrete", "minecraft:gray_concrete")
+                    )
+            );
+
+            // 1. Write the Create .nbt schematic files
+            SchematicNbtHelper.writePatternToNbtFile(stonePattern, SERVER_STRUCTURES_DIR.resolve("template_foundation_stone.nbt"));
+            SchematicNbtHelper.writePatternToNbtFile(concretePattern, SERVER_STRUCTURES_DIR.resolve("template_foundation_concrete.nbt"));
+
+            // 2. Write the metadata JSON with the "material:nbt" array
+            List<String> schematicsList = List.of(
+                    "Stone:template_foundation_stone.nbt",
+                    "Concrete:template_foundation_concrete.nbt"
+            );
 
             StructureData template = new StructureData(
-                "Template Foundation",
-                "Satiscraftory",
-                "A reference structure showing all available fields and how to use them.",
-                "Foundations",
-                "Foundations > Stone",
-                "satisfactory_build_tool:textures/gui/icons/factory_default.png",
-                0,
-                "",
-                0,
-                false,
-                items,
-                pattern
+                    "Template Foundation",
+                    "FICSIT",
+                    "A reference structure showing the material:nbt array format.",
+                    "Foundations",
+                    "Foundations > Foundations",
+                    "minecraft:stone",
+                    schematicsList,
+                    0,
+                    "",
+                    0,
+                    true,
+                    items,
+                    stonePattern
             );
 
             File templateFile = new File(SERVER_STRUCTURES_DIR.toFile(), "template_foundation.json");
             try (FileWriter writer = new FileWriter(templateFile)) {
                 GSON.toJson(template, writer);
-                SatisfactoryBuildTool.LOGGER.info("Default template created: {}", templateFile.getAbsolutePath());
             }
         } catch (IOException e) {
             SatisfactoryBuildTool.LOGGER.error("Failed to create default template", e);
         }
     }
 
-    /**
-     * Carrega todas as estruturas da pasta de estruturas DO CLIENTE
-     * Chamado no lado do cliente para carregar cache local e blueprints
-     */
     public static void loadClientStructures() {
         LOCAL_STRUCTURES.clear();
-
         try {
             if (!Files.exists(CLIENT_STRUCTURES_DIR)) {
                 Files.createDirectories(CLIENT_STRUCTURES_DIR);
                 return;
             }
+            File[] structureFiles = CLIENT_STRUCTURES_DIR.toFile().listFiles((dir, name) -> name.toLowerCase().endsWith(".json"));
+            if (structureFiles == null) return;
 
-            File structuresDir = CLIENT_STRUCTURES_DIR.toFile();
-            File[] structureFiles = structuresDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".json"));
-
-            if (structureFiles == null || structureFiles.length == 0) {
-                return;
-            }
-
-            int loadedCount = 0;
-            
             for (File file : structureFiles) {
-                try {
-                    StructureData structure = loadStructureFromFile(file);
-                    if (structure != null) {
-                        structure.setFromLocal(true);
-                        LOCAL_STRUCTURES.put(structure.getName().toLowerCase(), structure);
-                        loadedCount++;
-                    }
-                } catch (Exception e) {
-                    SatisfactoryBuildTool.LOGGER.error("Error loading client structure from file: {}", file.getName(), e);
+                StructureData structure = loadStructureFromFile(file, null);
+                if (structure != null) {
+                    structure.setFromLocal(true);
+                    LOCAL_STRUCTURES.put(structure.getName().toLowerCase(), structure);
                 }
             }
-
-            SatisfactoryBuildTool.LOGGER.info("Loaded {} client structures from local cache", loadedCount);
-
         } catch (IOException e) {
             SatisfactoryBuildTool.LOGGER.error("Error accessing client structures directory", e);
         }
     }
 
-    /**
-     * Carrega uma estrutura individual de um arquivo JSON
-     */
-    private static StructureData loadStructureFromFile(File file) {
+    public static StructureData loadStructureFromFile(File file, ResourceManager resourceManager) {
         try (FileReader reader = new FileReader(file)) {
             StructureData structure = GSON.fromJson(reader, StructureData.class);
-
-            if (structure != null && structure.isValid()) {
-                // Set the source filename
-                structure.setFileName(file.getName());
-                // Pré-processa os estados dos blocos para melhor performance
-                structure.preprocessBlockStates();
-                return structure;
-            } else {
-                SatisfactoryBuildTool.LOGGER.error("Estrutura inválida no arquivo: {}", file.getName());
-                return null;
+            if (structure != null) {
+                structure.loadSchematics(file, null, resourceManager);
+                if (structure.isValid()) {
+                    structure.setFileName(file.getName());
+                    structure.preprocessBlockStates();
+                    return structure;
+                } else {
+                    SatisfactoryBuildTool.LOGGER.error("Invalid structure or missing .nbt schematic for file: {}", file.getName());
+                }
             }
+            return null;
         } catch (Exception e) {
-            SatisfactoryBuildTool.LOGGER.error("Erro ao ler arquivo de estrutura: {}", file.getName(), e);
+            SatisfactoryBuildTool.LOGGER.error("Error reading structure file: {}", file.getName(), e);
             return null;
         }
     }
 
-    // ... loadStructureFromFile ...
-
-    /**
-     * Adiciona uma estrutura ao mapa do CLIENTE
-     * Chamado quando o cliente recebe um pacote de estrutura
-     */
     public static void addClientStructure(StructureData structure, boolean isOfficial) {
         if (structure != null && structure.isValid()) {
-            structure.setFromServer(isOfficial); 
-            structure.setFromLocal(!isOfficial); 
+            structure.setFromServer(isOfficial);
+            structure.setFromLocal(!isOfficial);
             structure.preprocessBlockStates();
             if (isOfficial) {
                 SYNCED_STRUCTURES.put(structure.getName().toLowerCase(), structure);
             } else {
                 LOCAL_STRUCTURES.put(structure.getName().toLowerCase(), structure);
             }
-            SatisfactoryBuildTool.LOGGER.info("Client Structure added/updated: {} (Official: {})", structure.getName(), isOfficial);
         }
     }
-    
-    /**
-     * Obtém uma estrutura (Preferência para Server se existir, senão Client?)
-     * Na verdade, o uso depende do contexto.
-     * BuildTool (Client) deve usar getClientStructure.
-     * Sync (Server) deve usar getServerStructure.
-     */
-     
+
     public static StructureData getClientStructure(String name) {
         String key = name.toLowerCase();
         if (SYNCED_STRUCTURES.containsKey(key)) {
@@ -278,76 +272,90 @@ public class StructureLoader {
     public static StructureData getServerStructure(String name) {
         return SERVER_STRUCTURES.get(name.toLowerCase());
     }
-    
-    /**
-     * Helper antigo para compatibilidade, mas idealmente deve ser substituído por chamadas explícitas.
-     * Mantendo para não quebrar código existente imediatamente, mas redirecionando.
-     * SE for chamado no Server Thread, retorna Server. Se Client, retorna Client?
-     * É difícil saber o thread context aqui de forma segura sem `DistExecutor`.
-     * Vamos assumir que quem chama sabe o que quer, ou mudamos os nomes.
-     * Vou mudar o nome do método original para forçar refatoração correta.
-     */
+
+    public static void clearSyncedStructures() {
+        SYNCED_STRUCTURES.clear();
+    }
 
     public static List<StructureData> getClientStructures() {
         Map<String, StructureData> merged = new HashMap<>(LOCAL_STRUCTURES);
-        merged.putAll(SYNCED_STRUCTURES); // Official structures overwrite local ones with same name
+
+        net.minecraft.world.entity.player.Player clientPlayer = null;
+        try {
+            clientPlayer = net.minecraft.client.Minecraft.getInstance().player;
+        } catch (Exception ignored) {}
+
+        for (Map.Entry<String, StructureData> entry : SYNCED_STRUCTURES.entrySet()) {
+            // Live client-side check so resetting FTB Quests hides re-locked buildings immediately
+            if (clientPlayer == null || ProgressionHandler.isStructureUnlocked(clientPlayer, entry.getValue())) {
+                merged.put(entry.getKey(), entry.getValue());
+            }
+        }
+
         List<StructureData> list = new ArrayList<>(merged.values());
         list.sort(Comparator.comparing(s -> s.getName().toLowerCase()));
         return list;
     }
-    
+
     public static List<StructureData> getServerStructures() {
         List<StructureData> list = new ArrayList<>(SERVER_STRUCTURES.values());
         list.sort(Comparator.comparing(s -> s.getName().toLowerCase()));
         return list;
     }
-    
+
     public static Path getClientStructuresDir() {
         return CLIENT_STRUCTURES_DIR;
     }
 
-    /**
-     * Classe que representa os dados de uma estrutura
-     */
     public static class StructureData {
         private String name;
         private String author;
         private String description;
         private String category;
-        private String guiPath; // NEW
-        private String iconPath; // NEW
+        private String guiPath;
+        private String iconPath;
+
+        // Array of "Material:filename.nbt" entries (also accepts "materials" or "material_schematics" in JSON)
+        @SerializedName(value = "schematics", alternate = {"materials", "material_schematics"})
+        private List<String> schematics = new ArrayList<>();
+
+        // Optional single-schematic fallback field
+        private String schematic;
+
         private int tier = 0;
-        private String subtier; // NEW
-        private int energyConsumption = 0; // NEW
+        private String subtier;
+        private int energyConsumption = 0;
         private boolean onlyItems = false;
         private List<RequiredItem> requiredItems = new ArrayList<>();
-        private List<List<List<String>>> pattern; // Novo formato: Y → Z → X com strings completas
 
+        // Transient runtime caches (never written into the JSON)
+        private transient List<List<List<String>>> pattern;
+        private transient Map<String, List<List<List<String>>>> materialPatterns = new LinkedHashMap<>();
         private transient Map<String, BlockState> blockStateCache = new HashMap<>();
-        private transient String fileName; // NEW: Track the source filename for deletion/editing
-        private transient boolean fromServer = false; // NEW: Flag to identify official structures
-        private transient boolean fromLocal = false;  // NEW: Flag to identify user blueprints
+        private transient String fileName;
+        private transient boolean fromServer = false;
+        private transient boolean fromLocal = false;
 
-        public void setFileName(String fileName) { this.fileName = fileName; }
-        public String getFileName() { return fileName; }
-        
-        public void setFromServer(boolean fromServer) { this.fromServer = fromServer; }
-        public boolean isServerStructure() { return fromServer; }
-        
-        public void setFromLocal(boolean fromLocal) { this.fromLocal = fromLocal; }
-        public boolean isLocalStructure() { return fromLocal; }
+        public StructureData() {}
 
-        // Default constructor for Gson
-        public StructureData() {
+        public StructureData(String name, String author, String description, String category, String guiPath,
+                             String iconPath, int tier, String subtier, int energyConsumption, boolean onlyItems,
+                             List<RequiredItem> requiredItems, List<List<List<String>>> pattern) {
+            this(name, author, description, category, guiPath, iconPath,
+                    new ArrayList<>(List.of("Default:" + (name != null ? name.toLowerCase().replace(" ", "_") + ".nbt" : "structure.nbt"))),
+                    tier, subtier, energyConsumption, onlyItems, requiredItems, pattern);
         }
-        
-        public StructureData(String name, String author, String description, String category, String guiPath, String iconPath, int tier, String subtier, int energyConsumption, boolean onlyItems, List<RequiredItem> requiredItems, List<List<List<String>>> pattern) {
+
+        public StructureData(String name, String author, String description, String category, String guiPath,
+                             String iconPath, List<String> schematics, int tier, String subtier, int energyConsumption,
+                             boolean onlyItems, List<RequiredItem> requiredItems, List<List<List<String>>> pattern) {
             this.name = name;
             this.author = author;
             this.description = description;
             this.category = category;
             this.guiPath = guiPath;
             this.iconPath = iconPath;
+            this.schematics = schematics != null ? new ArrayList<>(schematics) : new ArrayList<>();
             this.tier = tier;
             this.subtier = subtier;
             this.energyConsumption = energyConsumption;
@@ -356,80 +364,182 @@ public class StructureLoader {
             this.pattern = pattern;
         }
 
-        // Getters
+        /**
+         * Parses all "Material:file.nbt" entries in the schematics array and loads each .nbt pattern.
+         */
+        public void loadSchematics(@Nullable File sourceJsonFile, @Nullable ResourceLocation sourceResourceLoc,
+                                   @Nullable ResourceManager resourceManager) {
+            if (this.materialPatterns == null) {
+                this.materialPatterns = new LinkedHashMap<>();
+            } else {
+                this.materialPatterns.clear();
+            }
+
+            if (this.schematics == null) {
+                this.schematics = new ArrayList<>();
+            }
+
+            // 1. Load every "Material:file.nbt" entry from the array
+            for (String entry : this.schematics) {
+                if (entry == null || entry.trim().isEmpty()) continue;
+
+                String matKey = "default";
+                String nbtFile = entry.trim();
+
+                int colonIdx = nbtFile.indexOf(':');
+                if (colonIdx != -1) {
+                    matKey = nbtFile.substring(0, colonIdx).trim().toLowerCase();
+                    nbtFile = nbtFile.substring(colonIdx + 1).trim();
+                }
+
+                List<List<List<String>>> loaded = SchematicNbtHelper.loadSchematicPattern(
+                        nbtFile, sourceJsonFile, sourceResourceLoc, resourceManager
+                );
+                if (loaded != null && !loaded.isEmpty()) {
+                    this.materialPatterns.put(matKey, loaded);
+                    if (this.pattern == null || this.pattern.isEmpty()) {
+                        this.pattern = loaded; // First valid schematic becomes the default pattern
+                    }
+                }
+            }
+
+            // 2. Fallback to single "schematic" field or "<json_name>.nbt" if the array was empty
+            if (this.pattern == null || this.pattern.isEmpty()) {
+                List<List<List<String>>> fallback = SchematicNbtHelper.loadSchematicPattern(
+                        this.schematic, sourceJsonFile, sourceResourceLoc, resourceManager
+                );
+                if (fallback != null && !fallback.isEmpty()) {
+                    this.pattern = fallback;
+                    this.materialPatterns.put("default", fallback);
+                    String defaultNbt = (this.schematic != null && !this.schematic.isEmpty())
+                            ? this.schematic
+                            : getName().toLowerCase().replace(" ", "_") + ".nbt";
+                    if (this.schematics.isEmpty()) {
+                        this.schematics.add("Default:" + defaultNbt);
+                    }
+                }
+            }
+        }
+
+        /**
+         * Returns the 3D block pattern for the requested material name (e.g. "Concrete"),
+         * or falls back to the default pattern if that material isn't in the array.
+         */
+        public List<List<List<String>>> getPatternForMaterial(@Nullable String materialName) {
+            if (materialName != null && !materialName.isEmpty() && materialPatterns != null && !materialPatterns.isEmpty()) {
+                List<List<List<String>>> specific = materialPatterns.get(materialName.trim().toLowerCase());
+                if (specific != null && !specific.isEmpty()) {
+                    return specific;
+                }
+            }
+            return getPattern();
+        }
+
+        /**
+         * Returns true if this structure has a dedicated .nbt schematic for the given material name.
+         */
+        public boolean hasMaterialSchematic(@Nullable String materialName) {
+            if (materialName == null || materialName.isEmpty() || materialPatterns == null) return false;
+            return materialPatterns.containsKey(materialName.trim().toLowerCase());
+        }
+
+        public List<String> getSchematics() {
+            if (schematics == null || schematics.isEmpty()) {
+                String nbt = (schematic != null && !schematic.isEmpty())
+                        ? schematic
+                        : getName().toLowerCase().replace(" ", "_") + ".nbt";
+                return new ArrayList<>(List.of("Default:" + nbt));
+            }
+            return schematics;
+        }
+
+        public void setSchematics(List<String> schematics) {
+            this.schematics = schematics != null ? new ArrayList<>(schematics) : new ArrayList<>();
+        }
+
+        public Map<String, List<List<List<String>>>> getMaterialPatterns() {
+            if (materialPatterns == null) materialPatterns = new LinkedHashMap<>();
+            if (materialPatterns.isEmpty() && pattern != null && !pattern.isEmpty()) {
+                materialPatterns.put("default", pattern);
+            }
+            return materialPatterns;
+        }
+
+        public void setMaterialPatterns(Map<String, List<List<List<String>>>> materialPatterns) {
+            this.materialPatterns = materialPatterns != null ? new LinkedHashMap<>(materialPatterns) : new LinkedHashMap<>();
+            if ((this.pattern == null || this.pattern.isEmpty()) && !this.materialPatterns.isEmpty()) {
+                this.pattern = this.materialPatterns.values().iterator().next();
+            }
+        }
+
+        public void setFileName(String fileName) { this.fileName = fileName; }
+        public String getFileName() { return fileName; }
+
+        public void setFromServer(boolean fromServer) { this.fromServer = fromServer; }
+        public boolean isServerStructure() { return fromServer; }
+
+        public void setFromLocal(boolean fromLocal) { this.fromLocal = fromLocal; }
+        public boolean isLocalStructure() { return fromLocal; }
+
         public String getName() { return name != null ? name : "Unknown"; }
         public String getAuthor() { return author != null ? author : "Unknown"; }
         public String getDescription() { return description != null ? description : ""; }
         public String getCategory() { return category != null ? category : "unknown"; }
-        public String getGuiPath() { return guiPath != null ? guiPath : getCategory(); } // Default to category
-        public String getIconPath() { return iconPath; } // NEW
+        public String getGuiPath() { return guiPath != null ? guiPath : getCategory(); }
+        public String getIconPath() { return iconPath; }
         public int getTier() { return tier; }
-        public String getSubtier() { return subtier; } // NEW
-        public int getEnergyConsumption() { return energyConsumption; } // NEW
+        public String getSubtier() { return subtier; }
+        public int getEnergyConsumption() { return energyConsumption; }
         public boolean isOnlyItems() { return onlyItems; }
         public List<RequiredItem> getRequiredItems() { return requiredItems != null ? requiredItems : new ArrayList<>(); }
+
         public List<List<List<String>>> getPattern() { return pattern != null ? pattern : new ArrayList<>(); }
+        public void setPattern(List<List<List<String>>> pattern) { this.pattern = pattern; }
 
         public List<RequiredItem> getAggregatedCosts() {
             Map<String, Integer> costs = new HashMap<>();
-            
-            // Add required items
             if (requiredItems != null) {
                 for (RequiredItem item : requiredItems) {
                     costs.put(item.getItemId(), costs.getOrDefault(item.getItemId(), 0) + item.getCount());
                 }
             }
-            
-            // Add blocks from pattern if not onlyItems
             if (!onlyItems && pattern != null) {
                 for (List<List<String>> layer : pattern) {
                     for (List<String> row : layer) {
-                        for (String stateString : row) {
+                        for (String rawString : row) {
+                            String stateString = SchematicNbtHelper.stripNbt(rawString);
                             if (!stateString.equals(" ") && !stateString.isEmpty()) {
-                                // Extract item ID from state string (e.g. "minecraft:stone" or "minecraft:furnace[facing=north]")
-                                String itemId = stateString;
-                                if (stateString.contains("[")) {
-                                    itemId = stateString.substring(0, stateString.indexOf("["));
-                                }
+                                String itemId = stateString.contains("[")
+                                        ? stateString.substring(0, stateString.indexOf("["))
+                                        : stateString;
                                 costs.put(itemId, costs.getOrDefault(itemId, 0) + 1);
                             }
                         }
                     }
                 }
             }
-            
             List<RequiredItem> result = new ArrayList<>();
             costs.forEach((id, count) -> result.add(new RequiredItem(id, count)));
-            // Sort by count descending
             result.sort((a, b) -> Integer.compare(b.getCount(), a.getCount()));
             return result;
         }
 
         /**
-         * Pré-processa os estados dos blocos para cache
+         * Pre-processes blockstates across ALL material schematics so switching materials has zero lag.
          */
         public void preprocessBlockStates() {
-            if (pattern == null) {
-                pattern = new ArrayList<>();
-            }
+            if (pattern == null) pattern = new ArrayList<>();
+            if (blockStateCache == null) blockStateCache = new HashMap<>();
 
-            if (blockStateCache == null) {
-                blockStateCache = new HashMap<>();
-            }
-
-            // Processa todas as strings únicas no padrão
             Set<String> uniqueStateStrings = new HashSet<>();
-            for (List<List<String>> layer : pattern) {
-                for (List<String> row : layer) {
-                    for (String stateString : row) {
-                        if (!stateString.equals(" ") && !stateString.isEmpty()) {
-                            uniqueStateStrings.add(stateString);
-                        }
-                    }
+            collectUniqueStates(pattern, uniqueStateStrings);
+
+            if (materialPatterns != null) {
+                for (List<List<List<String>>> matPattern : materialPatterns.values()) {
+                    collectUniqueStates(matPattern, uniqueStateStrings);
                 }
             }
 
-            // Pré-processa cada string única
             for (String stateString : uniqueStateStrings) {
                 BlockState state = parseBlockState(stateString);
                 if (state != null) {
@@ -438,38 +548,35 @@ public class StructureLoader {
             }
         }
 
-        /**
-         * Valida se a estrutura tem todos os dados necessários
-         */
-        public boolean isValid() {
-            return name != null && !name.isEmpty() &&
-                    pattern != null && !pattern.isEmpty();
+        private void collectUniqueStates(List<List<List<String>>> pat, Set<String> out) {
+            if (pat == null) return;
+            for (List<List<String>> layer : pat) {
+                for (List<String> row : layer) {
+                    for (String stateString : row) {
+                        String clean = SchematicNbtHelper.stripNbt(stateString);
+                        if (!clean.equals(" ") && !clean.isEmpty()) {
+                            out.add(clean);
+                        }
+                    }
+                }
+            }
         }
 
-        /**
-         * Obtém a altura da estrutura (número de camadas)
-         */
+        public boolean isValid() {
+            return name != null && !name.isEmpty() && pattern != null && !pattern.isEmpty();
+        }
+
         public int getHeight() {
             return pattern != null ? pattern.size() : 0;
         }
 
-        /**
-         * Obtém a largura da estrutura
-         */
         public int getWidth() {
-            if (pattern == null || pattern.isEmpty() || pattern.get(0).isEmpty()) {
-                return 0;
-            }
+            if (pattern == null || pattern.isEmpty() || pattern.get(0).isEmpty()) return 0;
             return pattern.get(0).get(0).size();
         }
 
-        /**
-         * Obtém o comprimento da estrutura
-         */
         public int getLength() {
-            if (pattern == null || pattern.isEmpty()) {
-                return 0;
-            }
+            if (pattern == null || pattern.isEmpty()) return 0;
             return pattern.get(0).size();
         }
 
@@ -486,83 +593,47 @@ public class StructureLoader {
             return Objects.hash(getName());
         }
 
-        /**
-         * Obtém o estado do bloco para uma string específica
-         */
         public BlockState getBlockStateForString(String stateString) {
-            if (stateString.equals(" ") || stateString.isEmpty()) {
-                return null; // Ar
+            String clean = SchematicNbtHelper.stripNbt(stateString);
+            if (clean.equals(" ") || clean.isEmpty()) return null;
+            if (blockStateCache != null && blockStateCache.containsKey(clean)) {
+                return blockStateCache.get(clean);
             }
-
-            if (blockStateCache != null && blockStateCache.containsKey(stateString)) {
-                return blockStateCache.get(stateString);
-            }
-
-            // Se não está no cache, analisa e adiciona
-            BlockState state = parseBlockState(stateString);
+            BlockState state = parseBlockState(clean);
             if (state != null && blockStateCache != null) {
-                blockStateCache.put(stateString, state);
+                blockStateCache.put(clean, state);
             }
-
             return state;
         }
 
-
-        /**
-         * Analisa a string do estado do bloco
-         */
         private BlockState parseBlockState(String stateString) {
             try {
-                if (stateString == null || stateString.isEmpty() || stateString.equals(" ")) {
-                    return null;
-                }
-
-                // Verifica se tem propriedades
+                if (stateString == null || stateString.isEmpty() || stateString.equals(" ")) return null;
                 int bracketIndex = stateString.indexOf('[');
-
                 if (bracketIndex == -1) {
-                    // Apenas ID do bloco, sem propriedades
                     Block block = BuiltInRegistries.BLOCK.get(ResourceLocation.parse(stateString));
                     return block != null ? block.defaultBlockState() : null;
                 }
-
-                // Extrai ID do bloco e propriedades
                 String blockId = stateString.substring(0, bracketIndex);
                 String propertiesString = stateString.substring(bracketIndex + 1, stateString.length() - 1);
-
                 Block block = BuiltInRegistries.BLOCK.get(ResourceLocation.parse(blockId));
-                if (block == null) {
-                    SatisfactoryBuildTool.LOGGER.error("Bloco não encontrado: {}", blockId);
-                    return null;
-                }
+                if (block == null) return null;
 
                 BlockState state = block.defaultBlockState();
-
-                // Aplica as propriedades
                 if (!propertiesString.isEmpty()) {
-                    String[] properties = propertiesString.split(",");
-                    for (String prop : properties) {
-                        String[] keyValue = prop.split("=");
-                        if (keyValue.length == 2) {
-                            String propName = keyValue[0];
-                            String propValue = keyValue[1];
-
-                            state = applyProperty(state, propName, propValue);
+                    for (String prop : propertiesString.split(",")) {
+                        String[] kv = prop.split("=");
+                        if (kv.length == 2) {
+                            state = applyProperty(state, kv[0].trim(), kv[1].trim());
                         }
                     }
                 }
-
                 return state;
-
             } catch (Exception e) {
-                SatisfactoryBuildTool.LOGGER.error("Erro ao analisar estado do bloco: {}", stateString, e);
                 return null;
             }
         }
 
-        /**
-         * Aplica uma propriedade ao estado do bloco
-         */
         private BlockState applyProperty(BlockState state, String propertyName, String value) {
             for (Property<?> prop : state.getProperties()) {
                 if (prop.getName().equals(propertyName)) {
@@ -572,21 +643,9 @@ public class StructureLoader {
             return state;
         }
 
-        /**
-         * Define o valor de uma propriedade
-         */
         private <T extends Comparable<T>> BlockState setPropertyValue(BlockState state, Property<T> property, String value) {
             Optional<T> parsedValue = property.getValue(value);
-            if (parsedValue.isPresent()) {
-                return state.setValue(property, parsedValue.get());
-            }
-            return state;
-        }
-
-        @Override
-        public String toString() {
-            return String.format("Structure{name='%s', category='%s', tier=%d, subtier='%s', size=%dx%dx%d}",
-                    getName(), getCategory(), getTier(), getSubtier(), getWidth(), getLength(), getHeight());
+            return parsedValue.map(t -> state.setValue(property, t)).orElse(state);
         }
     }
 

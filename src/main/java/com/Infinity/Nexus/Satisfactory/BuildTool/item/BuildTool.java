@@ -11,6 +11,7 @@ import com.Infinity.Nexus.Satisfactory.BuildTool.utils.PlacedStructure;
 
 import net.minecraft.ChatFormatting;
 
+import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.network.chat.Component;
@@ -142,7 +143,7 @@ public class BuildTool extends PickaxeItem {
         player.displayClientMessage(Component.translatable(messageKey).withStyle(color), true);
 
         if (currentMode == BuildMode.DESTRUCTION) {
-            player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.destruction_mode_instruction").withStyle(ChatFormatting.YELLOW), false);
+            player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.destruction_mode_instruction", Minecraft.getInstance().options.keyUse.getTranslatedKeyMessage().getString()).withStyle(ChatFormatting.YELLOW), false);
         } else if (currentMode == BuildMode.CLEAR) {
             player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.clear_mode_instruction").withStyle(ChatFormatting.YELLOW), false);
         }
@@ -488,6 +489,7 @@ public class BuildTool extends PickaxeItem {
                 int sizeInDir = StructurePreview.getStructureSizeInDirection(selectedStructure, StructurePreview.getPreviewDirection(), zoopDir);
                 currentPos = placementPos.relative(zoopDir, i * sizeInDir);
             }
+            StructurePreview.startBuildAnimation(selectedStructure, currentPos, StructurePreview.getPreviewDirection());
             ModMessages.sendToServer(new StructurePlacementC2SPacket(
                     packetStructure,
                     currentPos,

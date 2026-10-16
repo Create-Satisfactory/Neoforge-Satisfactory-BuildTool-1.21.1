@@ -1,15 +1,9 @@
-// StructureConverter.java
 package com.Infinity.Nexus.Satisfactory.BuildTool.utils;
 
 public class StructureConverter {
 
-    /**
-     * Converte StructureLoader.StructureData para StructureSaver.StructureData
-     */
     public static StructureSaver.StructureData convertToSaverFormat(StructureLoader.StructureData loaderData) {
-        if (loaderData == null) {
-            return null;
-        }
+        if (loaderData == null) return null;
 
         return new StructureSaver.StructureData(
                 loaderData.getName(),
@@ -18,6 +12,7 @@ public class StructureConverter {
                 loaderData.getCategory(),
                 loaderData.getGuiPath(),
                 loaderData.getIconPath(),
+                loaderData.getSchematics(),
                 loaderData.getTier(),
                 loaderData.getSubtier(),
                 loaderData.getEnergyConsumption(),
@@ -26,51 +21,31 @@ public class StructureConverter {
                 loaderData.getWidth(),
                 loaderData.getLength(),
                 loaderData.getHeight(),
-                loaderData.getPattern()
+                loaderData.getPattern(),
+                loaderData.getMaterialPatterns()
         );
     }
 
-    /**
-     * Converte StructureSaver.StructureData para StructureLoader.StructureData
-     */
     public static StructureLoader.StructureData convertToLoaderFormat(StructureSaver.StructureData saverData) {
-        if (saverData == null) {
-            return null;
-        }
+        if (saverData == null) return null;
 
-        StructureLoader.StructureData loaderData = new StructureLoader.StructureData();
-
-        try {
-            java.lang.reflect.Field[] fields = StructureLoader.StructureData.class.getDeclaredFields();
-
-            for (java.lang.reflect.Field field : fields) {
-                field.setAccessible(true);
-                switch (field.getName()) {
-                    case "name" -> field.set(loaderData, saverData.getName());
-                    case "author" -> field.set(loaderData, saverData.getAuthor());
-                    case "description" -> field.set(loaderData, saverData.getDescription());
-                    case "category" -> field.set(loaderData, saverData.getCategory());
-                    case "guiPath" -> field.set(loaderData, saverData.getGuiPath());
-                    case "iconPath" -> field.set(loaderData, saverData.getIconPath());
-                    case "tier" -> field.set(loaderData, saverData.getTier());
-                    case "subtier" -> field.set(loaderData, saverData.getSubtier());
-                    case "energyConsumption" -> field.set(loaderData, saverData.getEnergyConsumption());
-                    case "onlyItems" -> field.set(loaderData, saverData.isOnlyItems());
-                    case "requiredItems" -> field.set(loaderData, saverData.getRequiredItems());
-                    case "width" -> field.set(loaderData, saverData.getWidth());
-                    case "length" -> field.set(loaderData, saverData.getLength());
-                    case "height" -> field.set(loaderData, saverData.getHeight());
-                    case "pattern" -> field.set(loaderData, saverData.getPattern());
-                }
-            }
-
-            loaderData.preprocessBlockStates();
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            return null;
-        }
-
+        StructureLoader.StructureData loaderData = new StructureLoader.StructureData(
+                saverData.getName(),
+                saverData.getAuthor(),
+                saverData.getDescription(),
+                saverData.getCategory(),
+                saverData.getGuiPath(),
+                saverData.getIconPath(),
+                saverData.getSchematics(),
+                saverData.getTier(),
+                saverData.getSubtier(),
+                saverData.getEnergyConsumption(),
+                saverData.isOnlyItems(),
+                saverData.getRequiredItems(),
+                saverData.getPattern()
+        );
+        loaderData.setMaterialPatterns(saverData.getMaterialPatterns());
+        loaderData.preprocessBlockStates();
         return loaderData;
     }
 }

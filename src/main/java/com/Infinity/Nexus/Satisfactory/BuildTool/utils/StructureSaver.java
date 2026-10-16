@@ -18,7 +18,6 @@ import java.nio.file.Paths;
 import java.util.*;
 
 public class StructureSaver {
-
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final String STRUCTURES_DIR = "config/InfinityNexus/structures/client/";
 
@@ -26,13 +25,11 @@ public class StructureSaver {
                                                  String name, String author, String description,
                                                  String category, Player player) {
         try {
-            // Criar diretório se não existir
             Path dirPath = Paths.get(STRUCTURES_DIR);
             if (!Files.exists(dirPath)) {
                 Files.createDirectories(dirPath);
             }
 
-            // Determinar os limites da estrutura
             int minX = Math.min(pos1.getX(), pos2.getX());
             int minY = Math.min(pos1.getY(), pos2.getY());
             int minZ = Math.min(pos1.getZ(), pos2.getZ());
@@ -44,109 +41,84 @@ public class StructureSaver {
             int height = maxY - minY + 1;
             int length = maxZ - minZ + 1;
 
-            // Coletar blocos e criar padrão com estados completos
-            // REMOVER o sistema de chaves e usar diretamente as strings dos estados
             List<List<List<String>>> pattern3D = new ArrayList<>();
-
-            // Para cada camada Y
             for (int y = minY; y <= maxY; y++) {
                 List<List<String>> layer = new ArrayList<>();
-
-                // Para cada linha Z
                 for (int z = minZ; z <= maxZ; z++) {
                     List<String> row = new ArrayList<>();
-
-                    // Para cada coluna X
                     for (int x = minX; x <= maxX; x++) {
                         BlockPos currentPos = new BlockPos(x, y, z);
                         BlockState blockState = level.getBlockState(currentPos);
-
-                        // Pular blocos de ar
                         if (blockState.isAir()) {
-                            row.add(" "); // Usar espaço para ar
-                            continue;
+                            row.add(" ");
+                        } else {
+                            String stateStr = getBlockStateString(blockState);
+                            net.minecraft.world.level.block.entity.BlockEntity be = level.getBlockEntity(currentPos);
+                            if (be != null) {
+                                net.minecraft.nbt.CompoundTag beNbt = be.saveWithFullMetadata(level.registryAccess());
+                                beNbt.remove("x");
+                                beNbt.remove("y");
+                                beNbt.remove("z");
+                                if (!beNbt.isEmpty()) {
+                                    stateStr += beNbt.toString();
+                                }
+                            }
+                            row.add(stateStr);
                         }
-
-                        // Gerar string do estado completo do bloco
-                        String stateString = getBlockStateString(blockState);
-                        row.add(stateString);
                     }
                     layer.add(row);
                 }
                 pattern3D.add(layer);
             }
 
-            // Criar objeto de estrutura sem o sistema de chaves
+            String baseName = name.toLowerCase().replace(" ", "_");
+            String schematicFileName = baseName + ".nbt";
+
+            // 1. Write the Create .nbt schematic file
+            SchematicNbtHelper.writePatternToNbtFile(pattern3D, dirPath.resolve(schematicFileName));
+
+            List<String> schematicsList = new ArrayList<>(List.of("Default:" + schematicFileName));
+            Map<String, List<List<List<String>>>> materialMap = new LinkedHashMap<>();
+            materialMap.put("default", pattern3D);
+
+            // 2. Write the metadata JSON file with the "schematics" array
             StructureData structureData = new StructureData(
-                    name,
-                    author,
-                    description,
-                    category,
-                    null, // guiPath - will default to category
-                    null, // iconPath - NEW
-                    0, // Default Tier
-                    null, // Default Subtier
-                    0, // Default energyConsumption
-                    false, // Default onlyItems
-                    new ArrayList<>(), // Default RequiredItems
-                    width,
-                    length,
-                    height,
-                    pattern3D
+                    name, author, description, category,
+                    null, null, schematicsList,
+                    0, null, 0, false, new ArrayList<>(),
+                    width, length, height, pattern3D, materialMap
             );
 
-            // Salvar como JSON
-            String fileName = name.toLowerCase().replace(" ", "_") + ".json";
-            File outputFile = new File(STRUCTURES_DIR + fileName);
-
+            File outputFile = new File(STRUCTURES_DIR + baseName + ".json");
             try (FileWriter writer = new FileWriter(outputFile)) {
                 GSON.toJson(structureData, writer);
             }
 
-            if (level.getServer() != null) {
-                if (player != null && player instanceof ServerPlayer serverPlayer) {
-                    StructureSyncUtils.sendStructureToPlayer(serverPlayer, structureData);
-                }
+            if (level.getServer() != null && player instanceof ServerPlayer serverPlayer) {
+                StructureSyncUtils.sendStructureToPlayer(serverPlayer, structureData);
             }
-
             return true;
-
         } catch (IOException e) {
             e.printStackTrace();
             return false;
         }
     }
 
-    /**
-     * Converte BlockState para string no formato "block_id[property1=value1,property2=value2]"
-     */
     private static String getBlockStateString(BlockState state) {
         StringBuilder sb = new StringBuilder();
-
-        // Adiciona o ID do bloco
-        String blockId = state.getBlock().builtInRegistryHolder().key().location().toString();
-        sb.append(blockId);
-
-        // Adiciona as propriedades se existirem
+        sb.append(state.getBlock().builtInRegistryHolder().key().location().toString());
         if (!state.getProperties().isEmpty()) {
             sb.append("[");
             List<String> properties = new ArrayList<>();
-
             for (Property<?> property : state.getProperties()) {
-                String value = getPropertyValue(state, property);
-                properties.add(property.getName() + "=" + value);
+                properties.add(property.getName() + "=" + getPropertyValue(state, property));
             }
-
             sb.append(String.join(",", properties));
             sb.append("]");
         }
-
         return sb.toString();
     }
 
-    /**
-     * Obtém o valor de uma propriedade como string
-     */
     private static <T extends Comparable<T>> String getPropertyValue(BlockState state, Property<T> property) {
         return state.getValue(property).toString();
     }
@@ -156,26 +128,41 @@ public class StructureSaver {
         public String author;
         public String description;
         public String category;
-        public String guiPath; // NEW
-        public String iconPath; // NEW
+        public String guiPath;
+        public String iconPath;
+        public List<String> schematics;
         public int tier;
-        public String subtier; // NEW
-        public int energyConsumption; // NEW
+        public String subtier;
+        public int energyConsumption;
         public boolean onlyItems;
         public List<StructureLoader.RequiredItem> requiredItems;
         public int width;
         public int length;
         public int height;
-        public List<List<List<String>>> pattern; // Novo formato: Y → Z → X com strings completas
+        public transient List<List<List<String>>> pattern;
+        public transient Map<String, List<List<List<String>>>> materialPatterns;
 
-        public StructureData(String name, String author, String description, String category, String guiPath, String iconPath, int tier, String subtier, int energyConsumption, boolean onlyItems, List<StructureLoader.RequiredItem> requiredItems, int width, int length, int height,
+        public StructureData(String name, String author, String description, String category, String guiPath,
+                             String iconPath, int tier, String subtier, int energyConsumption, boolean onlyItems,
+                             List<StructureLoader.RequiredItem> requiredItems, int width, int length, int height,
                              List<List<List<String>>> pattern) {
+            this(name, author, description, category, guiPath, iconPath,
+                    new ArrayList<>(List.of("Default:" + (name != null ? name.toLowerCase().replace(" ", "_") + ".nbt" : "structure.nbt"))),
+                    tier, subtier, energyConsumption, onlyItems, requiredItems, width, length, height, pattern, new LinkedHashMap<>());
+        }
+
+        public StructureData(String name, String author, String description, String category, String guiPath,
+                             String iconPath, List<String> schematics, int tier, String subtier, int energyConsumption,
+                             boolean onlyItems, List<StructureLoader.RequiredItem> requiredItems,
+                             int width, int length, int height, List<List<List<String>>> pattern,
+                             Map<String, List<List<List<String>>>> materialPatterns) {
             this.name = name;
             this.author = author;
             this.description = description;
             this.category = category;
             this.guiPath = guiPath;
             this.iconPath = iconPath;
+            this.schematics = schematics != null ? new ArrayList<>(schematics) : new ArrayList<>();
             this.tier = tier;
             this.subtier = subtier;
             this.energyConsumption = energyConsumption;
@@ -185,23 +172,27 @@ public class StructureSaver {
             this.length = length;
             this.height = height;
             this.pattern = pattern;
+            this.materialPatterns = materialPatterns != null ? materialPatterns : new LinkedHashMap<>();
         }
 
-        // Getters
         public String getName() { return name != null ? name : "Unknown"; }
         public String getAuthor() { return author != null ? author : "Unknown"; }
         public String getDescription() { return description != null ? description : ""; }
         public String getCategory() { return category != null ? category : "unknown"; }
-        public String getGuiPath() { return guiPath != null ? guiPath : category; } // NEW
-        public String getIconPath() { return iconPath; } // NEW
+        public String getGuiPath() { return guiPath != null ? guiPath : category; }
+        public String getIconPath() { return iconPath; }
+        public List<String> getSchematics() { return schematics != null ? schematics : new ArrayList<>(); }
         public int getTier() { return tier; }
-        public String getSubtier() { return subtier; } // NEW
-        public int getEnergyConsumption() { return energyConsumption; } // NEW
+        public String getSubtier() { return subtier; }
+        public int getEnergyConsumption() { return energyConsumption; }
         public boolean isOnlyItems() { return onlyItems; }
         public List<StructureLoader.RequiredItem> getRequiredItems() { return requiredItems; }
         public int getWidth() { return width; }
         public int getLength() { return length; }
         public int getHeight() { return height; }
         public List<List<List<String>>> getPattern() { return pattern != null ? pattern : new ArrayList<>(); }
+        public Map<String, List<List<List<String>>>> getMaterialPatterns() {
+            return materialPatterns != null ? materialPatterns : new LinkedHashMap<>();
+        }
     }
 }

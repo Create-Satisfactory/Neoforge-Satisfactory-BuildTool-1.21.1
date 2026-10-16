@@ -1,4 +1,3 @@
-// ClientStructureSaver.java
 package com.Infinity.Nexus.Satisfactory.BuildTool.utils;
 
 import com.google.gson.Gson;
@@ -13,23 +12,16 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
+import java.util.*;
 
 public class ClientStructureSaver {
-
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
-    /**
-     * Salva uma estrutura recebida do servidor no lado do cliente
-     */
+
     public static boolean saveStructureLocally(StructureSyncS2CPacket.StructureData structureData) {
         try {
-            // Criar diretório CLIENTE CACHE se não existir
-            Path dirPath = StructureLoader.getClientStructuresDir();
-            if (!Files.exists(dirPath)) {
-                Files.createDirectories(dirPath);
-            }
+            List<String> syncedSchematics = new ArrayList<>(structureData.schematics());
+            Map<String, List<List<List<String>>>> matPatterns = new LinkedHashMap<>(structureData.materialPatterns());
 
-            // Converter para o formato de dados da estrutura (Usando StructureSaver.StructureData)
             StructureData localStructureData = new StructureData(
                     structureData.name(),
                     structureData.author(),
@@ -37,6 +29,7 @@ public class ClientStructureSaver {
                     structureData.category(),
                     structureData.guiPath(),
                     structureData.iconPath(),
+                    syncedSchematics,
                     structureData.tier(),
                     structureData.subtier(),
                     structureData.energyConsumption(),
@@ -45,54 +38,52 @@ public class ClientStructureSaver {
                     getWidth(structureData.pattern()),
                     getLength(structureData.pattern()),
                     getHeight(structureData.pattern()),
-                    structureData.pattern()
+                    structureData.pattern(),
+                    matPatterns
             );
 
-            // Salvar como JSON
-            String fileName = structureData.name().toLowerCase().replace(" ", "_") + ".json";
-            File outputFile = new File(dirPath.toFile(), fileName);
+            // Only write to config/InfinityNexus/structures/client/ if it is a player-created Blueprint (!isOfficial)
+            String baseName = structureData.name().toLowerCase().replace(" ", "_");
+            String jsonFileName = baseName + ".json";
 
-            try (FileWriter writer = new FileWriter(outputFile)) {
-                GSON.toJson(localStructureData, writer);
+            if (!structureData.isOfficial()) {
+                Path dirPath = StructureLoader.getClientStructuresDir();
+                if (!Files.exists(dirPath)) {
+                    Files.createDirectories(dirPath);
+                }
+                String fallbackNbt = baseName + ".nbt";
+                SchematicNbtHelper.writePatternToNbtFile(structureData.pattern(), dirPath.resolve(fallbackNbt));
+
+                File outputFile = new File(dirPath.toFile(), jsonFileName);
+                try (FileWriter writer = new FileWriter(outputFile)) {
+                    GSON.toJson(localStructureData, writer);
+                }
             }
 
-            SatisfactoryBuildTool.LOGGER.info("Structure saved locally to cache: {}", fileName);
-            
-            // Converter para Loader Format e adicionar à memória DO CLIENTE
+            // Register in client memory and refresh the Build Tool list
             StructureLoader.StructureData loaderData = StructureConverter.convertToLoaderFormat(localStructureData);
             if (loaderData != null) {
-                loaderData.setFileName(fileName);
+                loaderData.setFileName(jsonFileName);
                 StructureLoader.addClientStructure(loaderData, structureData.isOfficial());
-                BuildTool.loadStructures(); // Atualiza a lista no Client
+                BuildTool.loadStructures();
             }
-            
             return true;
-
         } catch (IOException e) {
-            e.printStackTrace();
+            SatisfactoryBuildTool.LOGGER.error("Failed processing synced structure", e);
             return false;
         }
     }
 
-    /**
-     * Calcula a largura (X) baseada no pattern
-     */
     private static int getWidth(List<List<List<String>>> pattern) {
         if (pattern.isEmpty() || pattern.get(0).isEmpty()) return 0;
         return pattern.get(0).get(0).size();
     }
 
-    /**
-     * Calcula o comprimento (Z) baseado no pattern
-     */
     private static int getLength(List<List<List<String>>> pattern) {
         if (pattern.isEmpty()) return 0;
         return pattern.get(0).size();
     }
 
-    /**
-     * Calcula a altura (Y) baseada no pattern
-     */
     private static int getHeight(List<List<List<String>>> pattern) {
         return pattern.size();
     }

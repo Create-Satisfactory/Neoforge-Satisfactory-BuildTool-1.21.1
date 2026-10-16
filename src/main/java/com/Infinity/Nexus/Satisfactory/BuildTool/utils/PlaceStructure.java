@@ -2,39 +2,100 @@ package com.Infinity.Nexus.Satisfactory.BuildTool.utils;
 
 import com.Infinity.Nexus.Satisfactory.BuildTool.SatisfactoryBuildTool;
 import com.Infinity.Nexus.Satisfactory.BuildTool.config.Config;
-import com.Infinity.Nexus.Satisfactory.BuildTool.networking.ModMessages;
-import com.Infinity.Nexus.Satisfactory.BuildTool.networking.packet.StructureCompleteS2CPacket;
-import com.Infinity.Nexus.Satisfactory.BuildTool.utils.*;
-import com.Infinity.Nexus.Satisfactory.BuildTool.progression.PlayerProgression;
-import com.Infinity.Nexus.Satisfactory.BuildTool.progression.ProgressionHandler;
 import com.Infinity.Nexus.Satisfactory.BuildTool.item.BuildTool;
-import com.mojang.authlib.GameProfile;
+import com.Infinity.Nexus.Satisfactory.BuildTool.progression.ProgressionHandler;
+import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.particles.DustParticleOptions;
+import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.InteractionHand;
-import net.minecraft.world.InteractionResult;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Mirror;
+import net.minecraft.world.level.block.Rotation;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
-import net.neoforged.neoforge.common.CommonHooks;
-import net.neoforged.neoforge.common.util.FakePlayer;
+import org.jetbrains.annotations.Nullable;
+import org.joml.Vector3f;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 
 public class PlaceStructure {
-    private static int getBlocksPerTick() { return Config.blocks_per_tick; }
+
+    // FICSIT Orange particle color (#FA9549)
+    private static final DustParticleOptions FICSIT_ORANGE_PARTICLE =
+            new DustParticleOptions(new Vector3f(0.98f, 0.58f, 0.28f), 1.15f);
+    private static final DustParticleOptions FICSIT_CYAN_PARTICLE =
+            new DustParticleOptions(new Vector3f(0.25f, 0.85f, 1.0f), 0.9f);
+
     private static final Queue<StructureBuildTask> BUILD_QUEUE = new ArrayDeque<>();
+
+    // Cached reflection handles for Create's StructureTransform (supports Create & Copycats+ BlockEntities)
+    private static boolean transformReflectionInitialized = false;
+    private static Constructor<?> structureTransformCtor = null;
+    private static Method applyBlockStateMethod = null;
+    private static Method applyBlockEntityMethod = null;
+
+    private static void initCreateTransformReflection() {
+        if (transformReflectionInitialized) return;
+        transformReflectionInitialized = true;
+        try {
+            Class<?> stClass = Class.forName("com.simibubi.create.content.contraptions.StructureTransform");
+            structureTransformCtor = stClass.getConstructor(BlockPos.class, Direction.Axis.class, Rotation.class, Mirror.class);
+            applyBlockStateMethod = stClass.getMethod("apply", BlockState.class);
+            applyBlockEntityMethod = stClass.getMethod("apply", BlockEntity.class);
+        } catch (Exception e) {
+            SatisfactoryBuildTool.LOGGER.info("Create StructureTransform not found, using standard rotation fallback.");
+        }
+    }
+
+    @Nullable
+    public static Object createStructureTransform(Rotation rotation) {
+        initCreateTransformReflection();
+        if (structureTransformCtor == null) return null;
+        try {
+            return structureTransformCtor.newInstance(BlockPos.ZERO, Direction.Axis.Y, rotation, Mirror.NONE);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    public static BlockState applyCreateTransform(@Nullable Object transformObj, BlockState state, Rotation rotation, Direction direction) {
+        if (transformObj != null && applyBlockStateMethod != null) {
+            try {
+                return (BlockState) applyBlockStateMethod.invoke(transformObj, state);
+            } catch (Exception ignored) {}
+        }
+        try {
+            return state.rotate(rotation);
+        } catch (Exception ignored) {
+            return BlockRotationHelper.rotateBlockState(state, direction);
+        }
+    }
+
+    public static void applyCreateTransformToBlockEntity(@Nullable Object transformObj, BlockEntity be) {
+        if (transformObj != null && applyBlockEntityMethod != null && be != null) {
+            try {
+                applyBlockEntityMethod.invoke(transformObj, be);
+            } catch (Exception ignored) {}
+        }
+    }
 
     public static void buildStructure(StructureLoader.StructureData structure, BlockPos position, float rotationY, ServerPlayer player) {
         if (structure == null) {
-            player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.invalid_structure").withStyle(net.minecraft.ChatFormatting.RED), true);
+            player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.invalid_structure").withStyle(ChatFormatting.RED), true);
             return;
         }
 
@@ -42,53 +103,35 @@ public class PlaceStructure {
         if (pendingBuilds >= Config.max_queued_structures) {
             player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.build_in_progress")
                     .append(" (Limit: " + Config.max_queued_structures + ")")
-                    .withStyle(net.minecraft.ChatFormatting.YELLOW), true);
+                    .withStyle(ChatFormatting.YELLOW), true);
             return;
         }
 
         try {
-            // Progression Validation
-            if (!player.isCreative()) {
-                PlayerProgression progression = ProgressionHandler.getProgression(player.getUUID());
-                boolean canBuild = false;
-
-                if (progression.isStructureUnlocked(structure.getName())) {
-                    canBuild = true;
-                } else if (progression.getTier() >= structure.getTier()) {
-                    if (structure.getSubtier() == null || structure.getSubtier().isEmpty() ||
-                            progression.hasCompletedSubtier(structure.getSubtier())) {
-                        canBuild = true;
-                    }
-                }
-
-                if (!canBuild) {
-                    player.displayClientMessage(Component.translatable(
-                            "message.satisfactory_build_tool.structure_locked",
-                            structure.getName()
-                    ).withStyle(net.minecraft.ChatFormatting.RED), true);
-                    return;
-                }
+            // 1. Team & FTB Quests Progression Validation
+            if (!ProgressionHandler.isStructureUnlocked(player, structure)) {
+                player.displayClientMessage(Component.translatable(
+                        "message.satisfactory_build_tool.structure_locked",
+                        structure.getName()
+                ).withStyle(ChatFormatting.RED), true);
+                return;
             }
 
-            // Check for required items
+            // 2. Check and consume required items
             if (!player.isCreative() && (structure.getTier() > 0 || !structure.getRequiredItems().isEmpty())) {
                 List<StructureLoader.RequiredItem> requiredItems = structure.getRequiredItems();
                 boolean hasAllItems = true;
-
                 for (StructureLoader.RequiredItem req : requiredItems) {
                     if (!playerHasItem(player, req.getItemId(), req.getCount())) {
                         hasAllItems = false;
                         String itemName = req.getItemId();
                         try {
-                            net.minecraft.world.item.Item item = net.minecraft.core.registries.BuiltInRegistries.ITEM.get(net.minecraft.resources.ResourceLocation.parse(req.getItemId()));
-                            if (item != null) {
-                                itemName = item.getDescription().getString();
-                            }
+                            Item item = BuiltInRegistries.ITEM.get(ResourceLocation.parse(req.getItemId()));
+                            if (item != null) itemName = item.getDescription().getString();
                         } catch (Exception ignored) {}
-                        player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.missing_item", req.getCount(), itemName).withStyle(net.minecraft.ChatFormatting.RED), true);
+                        player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.missing_item", req.getCount(), itemName).withStyle(ChatFormatting.RED), true);
                     }
                 }
-
                 if (!hasAllItems) return;
 
                 if (structure.isOnlyItems()) {
@@ -99,64 +142,51 @@ public class PlaceStructure {
             }
 
             ServerLevel serverLevel = player.serverLevel();
-
-            if (!checkAreaClear(structure, position, rotationY, serverLevel)) {
+            if (!checkAreaClear(structure, position, rotationY, serverLevel, player)) {
                 if (!Config.allow_obstruction_clearing) {
-                    player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.area_obstructed").withStyle(net.minecraft.ChatFormatting.RED), true);
+                    player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.area_obstructed").withStyle(ChatFormatting.RED), true);
                     return;
-                } else {
-                     player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.clearing_obstructions").withStyle(net.minecraft.ChatFormatting.YELLOW), true);
                 }
             }
 
             boolean isCreativeOrOnlyItems = player.isCreative() || structure.isOnlyItems();
-
             StructureBuildTask mainTask = new StructureBuildTask(structure, position, player, serverLevel, isCreativeOrOnlyItems, rotationY);
             int totalBlocks = mainTask.collectBlocks();
 
             if (totalBlocks == 0) {
-                player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.no_blocks_to_place").withStyle(net.minecraft.ChatFormatting.YELLOW), true);
+                player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.no_blocks_to_place").withStyle(ChatFormatting.YELLOW), true);
                 return;
             }
+
+            // Play initial FICSIT hologram lock-in sound
+            serverLevel.playSound(null, position, SoundEvents.BEACON_ACTIVATE, SoundSource.BLOCKS, 0.7f, 1.6f);
 
             synchronized (BUILD_QUEUE) {
                 BUILD_QUEUE.offer(mainTask);
             }
-
-            player.displayClientMessage(Component.translatable(
-                    "message.satisfactory_build_tool.building_structure",
-                    structure.getName(), totalBlocks, getBlocksPerTick()
-            ).withStyle(net.minecraft.ChatFormatting.GREEN), true);
-
         } catch (Exception e) {
             SatisfactoryBuildTool.LOGGER.error("Error building structure: {}", e.getMessage(), e);
-            player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.build_error", e.getMessage()).withStyle(net.minecraft.ChatFormatting.RED), true);
+            player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.build_error", e.getMessage()).withStyle(ChatFormatting.RED), true);
         }
     }
 
     public static void tick() {
         synchronized (BUILD_QUEUE) {
             if (BUILD_QUEUE.isEmpty()) return;
-            int blocksProcessed = 0;
             Queue<StructureBuildTask> completedTasks = new ArrayDeque<>();
-            java.util.Set<java.util.UUID> processedPlayers = new java.util.HashSet<>();
+            Set<UUID> processedPlayers = new HashSet<>();
 
             for (StructureBuildTask task : BUILD_QUEUE) {
-                if (blocksProcessed >= getBlocksPerTick()) break;
-                
-                java.util.UUID playerUUID = task.player.getUUID();
-                if (processedPlayers.contains(playerUUID)) continue; // Sequential building per player
+                UUID playerUUID = task.player.getUUID();
+                if (processedPlayers.contains(playerUUID)) continue;
 
-                int processed = task.process(getBlocksPerTick() - blocksProcessed);
-                blocksProcessed += processed;
-                
+                task.tickBuildStep();
+
                 if (task.isCompleted()) {
                     completedTasks.offer(task);
                 } else {
-                    processedPlayers.add(playerUUID); // Don't process other tasks for this player in this tick
+                    processedPlayers.add(playerUUID);
                 }
-                
-                if (blocksProcessed >= getBlocksPerTick()) break;
             }
             BUILD_QUEUE.removeAll(completedTasks);
         }
@@ -179,126 +209,279 @@ public class PlaceStructure {
         private final ServerLevel level;
         private final boolean isCreative;
         private final float rotationY;
+        private final Direction direction;
+        private final Rotation rotation;
+        @Nullable
+        private final Object createTransform;
+
         private final Queue<BlockPlacement> blocksToPlace = new ArrayDeque<>();
+        private final List<BlockPos> placedPositions = new ArrayList<>();
+        private int width, length, height;
         private int totalBlocks = 0;
         private int blocksPlaced = 0;
+        private int blocksPerTick = 1;
+        private int ticksElapsed = 0;
         private boolean completed = false;
 
-        public StructureBuildTask(StructureLoader.StructureData structure, BlockPos startPos, ServerPlayer player, ServerLevel level, boolean isCreative, float rotationY) {
+        public StructureBuildTask(StructureLoader.StructureData structure, BlockPos startPos, ServerPlayer player,
+                                  ServerLevel level, boolean isCreative, float rotationY) {
             this.structure = structure;
             this.startPos = startPos;
             this.player = player;
             this.level = level;
             this.isCreative = isCreative;
             this.rotationY = rotationY;
+            this.direction = getDirectionFromYaw(rotationY);
+            this.rotation = getRotationFromDirection(this.direction);
+            this.createTransform = createStructureTransform(this.rotation);
         }
 
         public int collectBlocks() {
-            int width = structure.getWidth();
-            int length = structure.getLength();
-            int height = structure.getHeight();
-            Direction direction = getDirectionFromYaw(rotationY);
             int selectedColorIndex = 0;
+            String selectedMaterial = "";
             ItemStack mainHandItem = player.getMainHandItem();
             if (mainHandItem.getItem() instanceof BuildTool) {
                 selectedColorIndex = BuildTool.getColor(mainHandItem);
+                selectedMaterial = BuildTool.getMaterial(mainHandItem);
             }
+
+            List<List<List<String>>> activePattern = structure.getPatternForMaterial(selectedMaterial);
+            boolean usingMaterialSchematic = structure.hasMaterialSchematic(selectedMaterial);
+
+            if (activePattern == null || activePattern.isEmpty() || activePattern.get(0).isEmpty()) return 0;
+            this.height = activePattern.size();
+            this.length = activePattern.get(0).size();
+            this.width = activePattern.get(0).get(0).size();
+
             String templateBlockStr = Config.template_block;
             List<String> colorBlocks = Config.color_blocks;
 
+            double centerX = (width - 1) / 2.0;
+            double centerZ = (length - 1) / 2.0;
+
+            // Collect layer-by-layer (Y ascending), sorting each layer from center outward for a smooth Satisfactory wave
             for (int y = 0; y < height; y++) {
-                List<List<String>> layer = structure.getPattern().get(y);
-                for (int z = 0; z < length; z++) {
+                List<List<String>> layer = activePattern.get(y);
+                List<BlockPlacement> layerPlacements = new ArrayList<>();
+
+                for (int z = 0; z < length && z < layer.size(); z++) {
                     List<String> row = layer.get(z);
-                    for (int x = 0; x < width; x++) {
-                        String blockString = row.get(x);
-                        if (!blockString.equals(" ") && !blockString.isEmpty()) {
-                             // SECURITY FIX: Only official server structures can be colored or materialized
-                             boolean isOfficial = structure.isServerStructure();
-                             
-                             // Color replacement logic (only for official structures)
-                             if (isOfficial && blockString.contains(templateBlockStr) && !colorBlocks.isEmpty() && selectedColorIndex >= 0 && selectedColorIndex < colorBlocks.size()) {
-                                 String replacementId = colorBlocks.get(selectedColorIndex);
-                                 if (blockString.contains("[")) {
-                                     blockString = replacementId + blockString.substring(blockString.indexOf("["));
-                                 } else {
-                                     blockString = replacementId;
-                                 }
-                             }
-                             
-                             // Material replacement logic (only for official structures)
-                             if (isOfficial) {
-                                 String selectedMaterial = BuildTool.getMaterial(mainHandItem);
-                                 if (selectedMaterial != null && !selectedMaterial.isEmpty()) {
-                                     Config.MaterialEntry materialEntry = Config.material_blocks.stream()
-                                         .filter(m -> m.name.equals(selectedMaterial))
-                                         .findFirst().orElse(null);
-                                     
-                                     if (materialEntry != null && blockString.contains(Config.base_material)) {
-                                         blockString = blockString.replace(Config.base_material, materialEntry.blockId);
-                                         
-                                         // If material is concrete AND we have a color selected, apply color too
-                                         if (materialEntry.blockId.contains("_concrete") && selectedColorIndex >= 0 && selectedColorIndex < colorBlocks.size()) {
-                                             String concreteColor = colorBlocks.get(selectedColorIndex);
-                                             // Replace gray_concrete with the selected color concrete
-                                             if (blockString.contains("gray_concrete")) {
-                                                 blockString = blockString.replace("gray_concrete", concreteColor.replace("minecraft:", ""));
-                                             }
-                                         }
-                                     }
-                                 }
-                             }
-                            BlockPos blockPos = getRotatedBlockPos(startPos, x, y, z, width, length, direction);
-                            BlockState blockState = structure.getBlockStateForString(blockString);
-                            if (blockState != null) {
-                                blocksToPlace.offer(new BlockPlacement(rotateBlockState(blockState, direction), blockPos));
-                                totalBlocks++;
+                    for (int x = 0; x < width && x < row.size(); x++) {
+                        String rawBlockString = row.get(x);
+                        if (rawBlockString == null || rawBlockString.equals(" ") || rawBlockString.isEmpty()) continue;
+
+                        String cleanStateStr = SchematicNbtHelper.stripNbt(rawBlockString);
+                        CompoundTag beNbt = SchematicNbtHelper.extractNbt(rawBlockString);
+
+                        boolean isOfficial = structure.isServerStructure();
+
+                        if (isOfficial && cleanStateStr.contains(templateBlockStr) && !colorBlocks.isEmpty()
+                                && selectedColorIndex >= 0 && selectedColorIndex < colorBlocks.size()) {
+                            String replacementId = colorBlocks.get(selectedColorIndex);
+                            if (cleanStateStr.contains("[")) {
+                                cleanStateStr = replacementId + cleanStateStr.substring(cleanStateStr.indexOf("["));
+                            } else {
+                                cleanStateStr = replacementId;
                             }
+                        }
+
+                        if (isOfficial && !usingMaterialSchematic && selectedMaterial != null && !selectedMaterial.isEmpty()) {
+                            String finalMat = selectedMaterial;
+                            Config.MaterialEntry materialEntry = Config.material_blocks.stream()
+                                    .filter(m -> m.name.equals(finalMat))
+                                    .findFirst().orElse(null);
+
+                            if (materialEntry != null && cleanStateStr.contains(Config.base_material)) {
+                                cleanStateStr = cleanStateStr.replace(Config.base_material, materialEntry.blockId);
+                                if (materialEntry.blockId.contains("_concrete") && selectedColorIndex >= 0 && selectedColorIndex < colorBlocks.size()) {
+                                    String concreteColor = colorBlocks.get(selectedColorIndex);
+                                    if (cleanStateStr.contains("gray_concrete")) {
+                                        cleanStateStr = cleanStateStr.replace("gray_concrete", concreteColor.replace("minecraft:", ""));
+                                    }
+                                }
+                            }
+                        }
+
+                        BlockPos blockPos = getRotatedBlockPos(startPos, x, y, z, width, length, direction);
+                        BlockState baseState = structure.getBlockStateForString(cleanStateStr);
+                        if (baseState != null) {
+                            BlockState rotatedState = applyCreateTransform(createTransform, baseState, rotation, direction);
+                            double distFromCenter = Math.hypot(x - centerX, z - centerZ);
+                            layerPlacements.add(new BlockPlacement(rotatedState, blockPos, beNbt, distFromCenter));
                         }
                     }
                 }
+
+                // Sort each horizontal layer radially from center outward
+                layerPlacements.sort(Comparator.comparingDouble(p -> p.radialDist));
+                for (BlockPlacement bp : layerPlacements) {
+                    blocksToPlace.offer(bp);
+                    totalBlocks++;
+                }
             }
+
+            // Scale build speed so structures assemble smoothly in ~24 to 45 ticks (1.2 to 2.25 seconds)
+            int targetAnimationTicks = Math.clamp(16 + (int) Math.sqrt(totalBlocks) * 3, 20, 48);
+            this.blocksPerTick = Math.max(1, (int) Math.ceil((double) totalBlocks / targetAnimationTicks));
             return totalBlocks;
         }
 
-        public int process(int maxBlocks) {
-            int processed = 0;
-            while (processed < maxBlocks && !blocksToPlace.isEmpty()) {
-                BlockPlacement placement = blocksToPlace.poll();
-                if (tryPlaceBlock(placement.blockState, placement.pos, player, level, isCreative)) blocksPlaced++;
-                processed++;
-            }
-            if (blocksToPlace.isEmpty()) {
-                completed = true;
-                player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.build_complete", structure.getName(), blocksPlaced, totalBlocks, (isCreative ? " (Creative Mode)" : "")).withStyle(net.minecraft.ChatFormatting.GREEN), true);
-                
-                // Calculate bounds
-                int width = structure.getWidth();
-                int height = structure.getHeight();
-                int length = structure.getLength();
-                Direction direction = getDirectionFromYaw(rotationY);
-                
-                BlockPos p1 = getRotatedBlockPos(startPos, 0, 0, 0, width, length, direction);
-                BlockPos p2 = getRotatedBlockPos(startPos, width - 1, height - 1, length - 1, width, length, direction);
-                
-                BlockPos minPos = new BlockPos(
-                        Math.min(p1.getX(), p2.getX()),
-                        Math.min(p1.getY(), p2.getY()),
-                        Math.min(p1.getZ(), p2.getZ())
-                );
-                BlockPos maxPos = new BlockPos(
-                        Math.max(p1.getX(), p2.getX()),
-                        Math.max(p1.getY(), p2.getY()),
-                        Math.max(p1.getZ(), p2.getZ())
-                );
+        public void tickBuildStep() {
+            ticksElapsed++;
+            int processedThisTick = 0;
+            BlockPos lastPlacedPos = null;
 
-                PlacedStructure placed = new PlacedStructure(UUID.randomUUID(), structure.getName(), minPos, maxPos, startPos, rotationY, level.dimension());
-                ModMessages.sendToPlayer(new StructureCompleteS2CPacket(placed), player);
+            while (processedThisTick < blocksPerTick && !blocksToPlace.isEmpty()) {
+                BlockPlacement placement = blocksToPlace.poll();
+                if (placeSchematicBlock(placement)) {
+                    blocksPlaced++;
+                    placedPositions.add(placement.pos.immutable());
+                    lastPlacedPos = placement.pos;
+
+                    // Spawn FICSIT Orange materialization sparks on the newly formed block
+                    if (processedThisTick % Math.max(1, blocksPerTick / 4) == 0) {
+                        level.sendParticles(FICSIT_ORANGE_PARTICLE,
+                                placement.pos.getX() + 0.5, placement.pos.getY() + 0.5, placement.pos.getZ() + 0.5,
+                                3, 0.25, 0.25, 0.25, 0.02);
+                        level.sendParticles(ParticleTypes.ELECTRIC_SPARK,
+                                placement.pos.getX() + 0.5, placement.pos.getY() + 0.5, placement.pos.getZ() + 0.5,
+                                1, 0.2, 0.2, 0.2, 0.01);
+                    }
+                }
+                processedThisTick++;
             }
-            return processed;
+
+            // Spawn a FICSIT construction beam from the player's Build Tool to the active assembly point
+            if (lastPlacedPos != null) {
+                spawnConstructionBeam(player, level, Vec3.atCenterOf(lastPlacedPos));
+
+                if (ticksElapsed % 2 == 0) {
+                    float progress = (float) blocksPlaced / Math.max(1, totalBlocks);
+                    float pitch = 0.75f + (progress * 0.65f);
+                    level.playSound(null, lastPlacedPos, SoundEvents.COPPER_PLACE, SoundSource.BLOCKS, 0.55f, pitch);
+                }
+            }
+
+            if (blocksToPlace.isEmpty()) {
+                finishBuild();
+            }
+        }
+
+        private boolean placeSchematicBlock(BlockPlacement placement) {
+            BlockPos pos = placement.pos;
+            BlockState targetState = placement.blockState;
+
+            try {
+                if (ServerStructureTracker.get(level).isProtectedBlock(pos)) {
+                    return false;
+                }
+
+                Block targetBlock = targetState.getBlock();
+                BlockState currentState = level.getBlockState(pos);
+                if (!currentState.isAir() && !currentState.canBeReplaced() && !currentState.is(targetBlock)) {
+                    level.destroyBlock(pos, true, player);
+                }
+
+                if (!isCreative) {
+                    if (!hasBlockInInventory(targetBlock, player)) return false;
+                    ItemStack s = findBlockInInventory(targetBlock, player);
+                    if (!s.isEmpty()) s.shrink(1);
+                }
+
+                // 1. Place the rotated BlockState directly (like Create's Schematic placement)
+                level.setBlock(pos, targetState, Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE);
+
+                // 2. Restore & Rotate BlockEntity NBT (Copycats, Copycats+, Basins, Belts, Supervisors)
+                if (placement.blockEntityNbt != null && !placement.blockEntityNbt.isEmpty()) {
+                    BlockEntity be = level.getBlockEntity(pos);
+                    if (be != null) {
+                        CompoundTag fullNbt = placement.blockEntityNbt.copy();
+                        fullNbt.putInt("x", pos.getX());
+                        fullNbt.putInt("y", pos.getY());
+                        fullNbt.putInt("z", pos.getZ());
+
+                        // Load NBT components (fills Copycat Material & ItemStack, Basin filters, etc.)
+                        be.loadWithComponents(fullNbt, level.registryAccess());
+                        // Apply Create's StructureTransform to rotate internal BlockEntity data
+                        applyCreateTransformToBlockEntity(createTransform, be);
+                        be.setChanged();
+                        level.sendBlockUpdated(pos, targetState, targetState, Block.UPDATE_ALL);
+                    }
+                }
+                return true;
+            } catch (Exception e) {
+                SatisfactoryBuildTool.LOGGER.error("Error placing schematic block at {}: {}", pos, e.getMessage());
+                return false;
+            }
+        }
+
+        private void finishBuild() {
+            completed = true;
+
+            // Final pass: notify neighbors and sync BlockEntities so Create shafts/belts & Copycat textures connect
+            for (BlockPos pos : placedPositions) {
+                BlockState state = level.getBlockState(pos);
+                level.updateNeighborsAt(pos, state.getBlock());
+                BlockEntity be = level.getBlockEntity(pos);
+                if (be != null) {
+                    be.setChanged();
+                    level.sendBlockUpdated(pos, state, state, Block.UPDATE_ALL);
+                }
+            }
+
+            BlockPos p1 = getRotatedBlockPos(startPos, 0, 0, 0, width, length, direction);
+            BlockPos p2 = getRotatedBlockPos(startPos, width - 1, height - 1, length - 1, width, length, direction);
+
+            BlockPos minPos = new BlockPos(
+                    Math.min(p1.getX(), p2.getX()),
+                    Math.min(p1.getY(), p2.getY()),
+                    Math.min(p1.getZ(), p2.getZ())
+            );
+            BlockPos maxPos = new BlockPos(
+                    Math.max(p1.getX(), p2.getX()),
+                    Math.max(p1.getY(), p2.getY()),
+                    Math.max(p1.getZ(), p2.getZ())
+            );
+
+            // Final lock-in audio & particle burst
+            BlockPos centerPos = minPos.offset((maxPos.getX() - minPos.getX()) / 2, (maxPos.getY() - minPos.getY()) / 2, (maxPos.getZ() - minPos.getZ()) / 2);
+            level.playSound(null, centerPos, SoundEvents.IRON_GOLEM_REPAIR, SoundSource.BLOCKS, 0.8f, 1.35f);
+            level.sendParticles(ParticleTypes.END_ROD,
+                    centerPos.getX() + 0.5, maxPos.getY() + 0.5, centerPos.getZ() + 0.5,
+                    12, (maxPos.getX() - minPos.getX()) * 0.3, 0.3, (maxPos.getZ() - minPos.getZ()) * 0.3, 0.03);
+
+            PlacedStructure placed = new PlacedStructure(UUID.randomUUID(), structure.getName(), minPos, maxPos, startPos, rotationY, level.dimension());
+            ServerStructureTracker.get(level).registerStructure(level, placed, placedPositions);
         }
 
         public boolean isCompleted() { return completed; }
+    }
+
+    private static void spawnConstructionBeam(ServerPlayer player, ServerLevel level, Vec3 target) {
+        Vec3 look = player.getLookAngle();
+        Vec3 right = look.cross(new Vec3(0, 1, 0)).normalize().scale(0.35);
+        Vec3 start = player.getEyePosition().add(look.scale(0.6)).add(right).subtract(0, 0.2, 0);
+
+        Vec3 diff = target.subtract(start);
+        double dist = diff.length();
+        if (dist > 48.0 || dist < 0.5) return;
+
+        int steps = Math.min(12, Math.max(3, (int) (dist * 1.5)));
+        for (int i = 1; i <= steps; i++) {
+            double t = (double) i / steps;
+            Vec3 pt = start.add(diff.scale(t));
+            level.sendParticles(i % 2 == 0 ? FICSIT_ORANGE_PARTICLE : FICSIT_CYAN_PARTICLE,
+                    pt.x, pt.y, pt.z, 1, 0.02, 0.02, 0.02, 0.0);
+        }
+    }
+
+    public static Rotation getRotationFromDirection(Direction dir) {
+        return switch (dir) {
+            case EAST -> Rotation.CLOCKWISE_90;
+            case SOUTH -> Rotation.CLOCKWISE_180;
+            case WEST -> Rotation.COUNTERCLOCKWISE_90;
+            default -> Rotation.NONE;
+        };
     }
 
     private static BlockPos getRotatedBlockPos(BlockPos startPos, int x, int y, int z, int width, int length, Direction direction) {
@@ -312,46 +495,6 @@ public class PlaceStructure {
         return startPos.offset(rotatedX, y, rotatedZ);
     }
 
-    private static BlockState rotateBlockState(BlockState state, Direction direction) {
-        BlockState rotated = state;
-        if (rotated.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.AXIS)) rotated = rotateAxis(rotated, direction);
-        if (rotated.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.FACING)) rotated = rotateFacing(rotated, direction);
-        if (rotated.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.HORIZONTAL_FACING)) rotated = rotateHorizontalFacing(rotated, direction);
-        if (rotated.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.ROTATION_16)) rotated = rotateRotation(rotated, direction);
-        return rotated;
-    }
-
-    private static BlockState rotateAxis(BlockState state, Direction dir) {
-        Direction.Axis axis = state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.AXIS);
-        if (axis == Direction.Axis.Y) return state;
-        if (dir == Direction.EAST || dir == Direction.WEST) return state.setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.AXIS, axis == Direction.Axis.X ? Direction.Axis.Z : Direction.Axis.X);
-        return state;
-    }
-
-    private static BlockState rotateFacing(BlockState state, Direction dir) {
-        Direction facing = state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.FACING);
-        if (facing.getAxis() == Direction.Axis.Y) return state;
-        return state.setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.FACING, rotateDirection(facing, dir));
-    }
-
-    private static BlockState rotateHorizontalFacing(BlockState state, Direction dir) {
-        return state.setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.HORIZONTAL_FACING, rotateDirection(state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.HORIZONTAL_FACING), dir));
-    }
-
-    private static BlockState rotateRotation(BlockState state, Direction dir) {
-        int r = state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.ROTATION_16);
-        int offset = (dir == Direction.EAST) ? 4 : (dir == Direction.SOUTH) ? 8 : (dir == Direction.WEST) ? 12 : 0;
-        return state.setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.ROTATION_16, (r + offset) % 16);
-    }
-
-    private static Direction rotateDirection(Direction original, Direction rotation) {
-        if (original.getAxis() == Direction.Axis.Y) return original;
-        int rot = (rotation == Direction.EAST) ? 1 : (rotation == Direction.SOUTH) ? 2 : (rotation == Direction.WEST) ? 3 : 0;
-        Direction res = original;
-        for (int i = 0; i < rot; i++) res = res.getClockWise();
-        return res;
-    }
-
     private static Direction getDirectionFromYaw(float yaw) {
         float norm = (yaw + 360) % 360;
         if (norm >= 315 || norm < 45) return Direction.SOUTH;
@@ -360,16 +503,9 @@ public class PlaceStructure {
         return Direction.EAST;
     }
 
-    private static int getStructureSizeInDirection(StructureLoader.StructureData structure, Direction structRotation, Direction zoopDir) {
-        int w = structure.getWidth(), l = structure.getLength(), h = structure.getHeight();
-        int rw = (structRotation == Direction.EAST || structRotation == Direction.WEST) ? l : w;
-        int rl = (structRotation == Direction.EAST || structRotation == Direction.WEST) ? w : l;
-        return switch (zoopDir.getAxis()) { case X -> rw; case Z -> rl; case Y -> h; };
-    }
-
     private static boolean playerHasItem(ServerPlayer player, String itemId, int count) {
         try {
-            net.minecraft.world.item.Item item = net.minecraft.core.registries.BuiltInRegistries.ITEM.get(net.minecraft.resources.ResourceLocation.parse(itemId));
+            Item item = BuiltInRegistries.ITEM.get(ResourceLocation.parse(itemId));
             int found = 0;
             for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
                 ItemStack stack = player.getInventory().getItem(i);
@@ -381,7 +517,7 @@ public class PlaceStructure {
 
     private static void consumeItem(ServerPlayer player, String itemId, int count) {
         try {
-            net.minecraft.world.item.Item item = net.minecraft.core.registries.BuiltInRegistries.ITEM.get(net.minecraft.resources.ResourceLocation.parse(itemId));
+            Item item = BuiltInRegistries.ITEM.get(ResourceLocation.parse(itemId));
             int remaining = count;
             for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
                 ItemStack stack = player.getInventory().getItem(i);
@@ -395,24 +531,6 @@ public class PlaceStructure {
         } catch (Exception ignored) {}
     }
 
-    private static boolean tryPlaceBlock(BlockState targetState, BlockPos pos, ServerPlayer player, ServerLevel level, boolean isCreative) {
-        try {
-            Block targetBlock = targetState.getBlock();
-            BlockState currentState = level.getBlockState(pos);
-            if (!currentState.isAir() && !currentState.canBeReplaced() && !currentState.is(targetBlock)) {
-                player.gameMode.destroyBlock(pos);
-            }
-            if (!isCreative) {
-                // Procurar o item correto no inventário baseado no bloco necessário
-                if (!hasBlockInInventory(targetBlock, player)) return false;
-            }
-            return placeBlockAsPlayer(targetState, pos, player, level, isCreative);
-        } catch (Exception e) { 
-            SatisfactoryBuildTool.LOGGER.error("Error trying to place block at " + pos + ": " + e.getMessage());
-            return false; 
-        }
-    }
-
     private static ItemStack findBlockInInventory(Block block, ServerPlayer player) {
         for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
             ItemStack stack = player.getInventory().getItem(i);
@@ -420,61 +538,39 @@ public class PlaceStructure {
         }
         return ItemStack.EMPTY;
     }
-    
+
     private static boolean hasBlockInInventory(Block block, ServerPlayer player) {
-        int needed = 1; // We need at least 1 block
-        int found = 0;
-        
         for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
             ItemStack stack = player.getInventory().getItem(i);
-            if (Block.byItem(stack.getItem()) == block) {
-                found += stack.getCount();
-                if (found >= needed) return true;
-            }
+            if (Block.byItem(stack.getItem()) == block && !stack.isEmpty()) return true;
         }
         return false;
     }
 
-    private static boolean placeBlockAsPlayer(BlockState targetState, BlockPos pos, ServerPlayer player, ServerLevel level, boolean isCreative) {
-        try {
-            FakePlayer fakePlayer = new FakePlayer(level, new GameProfile(UUID.fromString("f66c412e-8c88-4d12-a0f4-1c55fd08f34f"), "[CREATIVITYORB]"));
-            fakePlayer.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(targetState.getBlock().asItem()));
-            UseOnContext ctx = new UseOnContext(fakePlayer, InteractionHand.MAIN_HAND, new BlockHitResult(Vec3.atCenterOf(pos).subtract(0, 1, 0), Direction.UP, pos, false));
-            if (CommonHooks.onPlaceItemIntoWorld(ctx).consumesAction()) {
-                if (!isCreative) {
-                    ItemStack s = findBlockInInventory(targetState.getBlock(), player);
-                    if (!s.isEmpty()) s.shrink(1);
-                }
-                level.setBlock(pos, targetState, 3);
-                return true;
-            }
-            return false;
-        } catch (Exception e) { return false; }
-    }
+    private static boolean checkAreaClear(StructureLoader.StructureData structure, BlockPos startPos, float rotationY,
+                                          ServerLevel level, ServerPlayer player) {
+        ItemStack held = player.getMainHandItem();
+        String selectedMat = held.getItem() instanceof BuildTool ? BuildTool.getMaterial(held) : "";
+        List<List<List<String>>> activePattern = structure.getPatternForMaterial(selectedMat);
+        if (activePattern == null || activePattern.isEmpty() || activePattern.get(0).isEmpty()) return false;
 
-    private static class BlockPlacement {
-        public final BlockState blockState;
-        public final BlockPos pos;
-        public BlockPlacement(BlockState state, BlockPos pos) { this.blockState = state; this.pos = pos; }
-    }
-    private static boolean checkAreaClear(StructureLoader.StructureData structure, BlockPos startPos, float rotationY, ServerLevel level) {
-        int width = structure.getWidth();
-        int length = structure.getLength();
-        int height = structure.getHeight();
+        int height = activePattern.size();
+        int length = activePattern.get(0).size();
+        int width = activePattern.get(0).get(0).size();
         Direction direction = getDirectionFromYaw(rotationY);
 
         for (int y = 0; y < height; y++) {
-            List<List<String>> layer = structure.getPattern().get(y);
-            for (int z = 0; z < length; z++) {
+            List<List<String>> layer = activePattern.get(y);
+            for (int z = 0; z < length && z < layer.size(); z++) {
                 List<String> row = layer.get(z);
-                for (int x = 0; x < width; x++) {
+                for (int x = 0; x < width && x < row.size(); x++) {
                     String blockString = row.get(x);
-                    // Only check positions where we are actually placing a block
-                    if (!blockString.equals(" ") && !blockString.isEmpty()) {
+                    if (blockString != null && !blockString.equals(" ") && !blockString.isEmpty()) {
                         BlockPos blockPos = getRotatedBlockPos(startPos, x, y, z, width, length, direction);
+                        if (ServerStructureTracker.get(level).isProtectedBlock(blockPos)) {
+                            return false;
+                        }
                         BlockState state = level.getBlockState(blockPos);
-                        
-                        // If it's not air and not replaceable, it's an obstruction
                         if (!state.isAir() && !state.canBeReplaced()) {
                             return false;
                         }
@@ -483,5 +579,20 @@ public class PlaceStructure {
             }
         }
         return true;
+    }
+
+    private static class BlockPlacement {
+        public final BlockState blockState;
+        public final BlockPos pos;
+        @Nullable
+        public final CompoundTag blockEntityNbt;
+        public final double radialDist;
+
+        public BlockPlacement(BlockState state, BlockPos pos, @Nullable CompoundTag blockEntityNbt, double radialDist) {
+            this.blockState = state;
+            this.pos = pos;
+            this.blockEntityNbt = blockEntityNbt;
+            this.radialDist = radialDist;
+        }
     }
 }
