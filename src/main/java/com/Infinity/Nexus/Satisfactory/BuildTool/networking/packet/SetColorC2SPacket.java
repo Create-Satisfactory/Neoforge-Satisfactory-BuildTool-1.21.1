@@ -43,8 +43,7 @@ public record SetColorC2SPacket(int color) implements CustomPacketPayload {
             ItemStack mainHandItem = player.getMainHandItem();
             if (mainHandItem.getItem() instanceof BuildTool) {
                 BuildTool.setColor(mainHandItem, packet.color());
-                
-                player.sendSystemMessage(Component.translatable("tooltip.satisfactory_build_tool.selected_color", packet.color()));
+                player.inventoryMenu.broadcastChanges();
             }
         });
     }

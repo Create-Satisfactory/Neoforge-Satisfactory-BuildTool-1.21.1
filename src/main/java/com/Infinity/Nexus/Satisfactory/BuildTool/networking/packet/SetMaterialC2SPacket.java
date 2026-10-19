@@ -41,7 +41,13 @@ public record SetMaterialC2SPacket(String materialName) implements CustomPacketP
 
             ItemStack mainHandItem = player.getMainHandItem();
             if (mainHandItem.getItem() instanceof BuildTool) {
-                BuildTool.setMaterial(mainHandItem, packet.materialName());
+                if (packet.materialName().startsWith("PATTERN:")) {
+                    String pattern = packet.materialName().substring("PATTERN:".length());
+                    BuildTool.setPattern(mainHandItem, pattern);
+                } else {
+                    BuildTool.setMaterial(mainHandItem, packet.materialName());
+                }
+                player.inventoryMenu.broadcastChanges();
             }
         });
     }

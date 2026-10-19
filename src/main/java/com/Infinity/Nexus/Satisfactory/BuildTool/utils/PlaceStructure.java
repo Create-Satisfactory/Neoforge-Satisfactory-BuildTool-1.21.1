@@ -93,6 +93,21 @@ public class PlaceStructure {
         }
     }
 
+    /**
+     * Replaces Primary & Secondary Swatch placeholder blocks AND fallback Material blocks
+     * in both outer BlockStates and inner Copycat {nbt} tags.
+     */
+    public static String applyCustomizerToRawString(
+            String rawBlockString,
+            boolean isOfficial,
+            boolean usingMaterialSchematic,
+            int selectedColorIndex,
+            @Nullable String selectedMaterial) {
+        return CustomizerManager.applyCustomizerReplacements(
+                rawBlockString, isOfficial, usingMaterialSchematic, selectedColorIndex, selectedMaterial
+        );
+    }
+
     public static void buildStructure(StructureLoader.StructureData structure, BlockPos position, float rotationY, ServerPlayer player) {
         if (structure == null) {
             player.displayClientMessage(Component.translatable("message.satisfactory_build_tool.invalid_structure").withStyle(ChatFormatting.RED), true);
@@ -117,11 +132,14 @@ public class PlaceStructure {
                 return;
             }
 
-            // 2. Check and consume required items
-            if (!player.isCreative() && (structure.getTier() > 0 || !structure.getRequiredItems().isEmpty())) {
-                List<StructureLoader.RequiredItem> requiredItems = structure.getRequiredItems();
+            ItemStack heldItem = player.getMainHandItem();
+            String selectedMaterial = (heldItem.getItem() instanceof BuildTool) ? BuildTool.getMaterial(heldItem) : "";
+            List<StructureLoader.RequiredItem> activeRequiredItems = structure.getRequiredItemsForMaterial(selectedMaterial);
+
+            // 2. Check and consume required items (supports per-material cost overrides)
+            if (!player.isCreative() && (structure.getTier() > 0 || !activeRequiredItems.isEmpty())) {
                 boolean hasAllItems = true;
-                for (StructureLoader.RequiredItem req : requiredItems) {
+                for (StructureLoader.RequiredItem req : activeRequiredItems) {
                     if (!playerHasItem(player, req.getItemId(), req.getCount())) {
                         hasAllItems = false;
                         String itemName = req.getItemId();
@@ -135,7 +153,7 @@ public class PlaceStructure {
                 if (!hasAllItems) return;
 
                 if (structure.isOnlyItems()) {
-                    for (StructureLoader.RequiredItem req : requiredItems) {
+                    for (StructureLoader.RequiredItem req : activeRequiredItems) {
                         consumeItem(player, req.getItemId(), req.getCount());
                     }
                 }
@@ -253,11 +271,9 @@ public class PlaceStructure {
             this.length = activePattern.get(0).size();
             this.width = activePattern.get(0).get(0).size();
 
-            String templateBlockStr = Config.template_block;
-            List<String> colorBlocks = Config.color_blocks;
-
             double centerX = (width - 1) / 2.0;
             double centerZ = (length - 1) / 2.0;
+            boolean isOfficial = structure.isServerStructure();
 
             // Collect layer-by-layer (Y ascending), sorting each layer from center outward for a smooth Satisfactory wave
             for (int y = 0; y < height; y++) {
@@ -270,37 +286,13 @@ public class PlaceStructure {
                         String rawBlockString = row.get(x);
                         if (rawBlockString == null || rawBlockString.equals(" ") || rawBlockString.isEmpty()) continue;
 
+                        // Apply Dual-Tone Swatch & Material replacements on both outer state AND inner Copycat {nbt}
+                        rawBlockString = applyCustomizerToRawString(
+                                rawBlockString, isOfficial, usingMaterialSchematic, selectedColorIndex, selectedMaterial
+                        );
+
                         String cleanStateStr = SchematicNbtHelper.stripNbt(rawBlockString);
                         CompoundTag beNbt = SchematicNbtHelper.extractNbt(rawBlockString);
-
-                        boolean isOfficial = structure.isServerStructure();
-
-                        if (isOfficial && cleanStateStr.contains(templateBlockStr) && !colorBlocks.isEmpty()
-                                && selectedColorIndex >= 0 && selectedColorIndex < colorBlocks.size()) {
-                            String replacementId = colorBlocks.get(selectedColorIndex);
-                            if (cleanStateStr.contains("[")) {
-                                cleanStateStr = replacementId + cleanStateStr.substring(cleanStateStr.indexOf("["));
-                            } else {
-                                cleanStateStr = replacementId;
-                            }
-                        }
-
-                        if (isOfficial && !usingMaterialSchematic && selectedMaterial != null && !selectedMaterial.isEmpty()) {
-                            String finalMat = selectedMaterial;
-                            Config.MaterialEntry materialEntry = Config.material_blocks.stream()
-                                    .filter(m -> m.name.equals(finalMat))
-                                    .findFirst().orElse(null);
-
-                            if (materialEntry != null && cleanStateStr.contains(Config.base_material)) {
-                                cleanStateStr = cleanStateStr.replace(Config.base_material, materialEntry.blockId);
-                                if (materialEntry.blockId.contains("_concrete") && selectedColorIndex >= 0 && selectedColorIndex < colorBlocks.size()) {
-                                    String concreteColor = colorBlocks.get(selectedColorIndex);
-                                    if (cleanStateStr.contains("gray_concrete")) {
-                                        cleanStateStr = cleanStateStr.replace("gray_concrete", concreteColor.replace("minecraft:", ""));
-                                    }
-                                }
-                            }
-                        }
 
                         BlockPos blockPos = getRotatedBlockPos(startPos, x, y, z, width, length, direction);
                         BlockState baseState = structure.getBlockStateForString(cleanStateStr);
@@ -320,7 +312,7 @@ public class PlaceStructure {
                 }
             }
 
-            // Scale build speed so structures assemble smoothly in ~24 to 45 ticks (1.2 to 2.25 seconds)
+            // Scale build speed so structures assemble smoothly in ~20 to 48 ticks (1.0 to 2.4 seconds)
             int targetAnimationTicks = Math.clamp(16 + (int) Math.sqrt(totalBlocks) * 3, 20, 48);
             this.blocksPerTick = Math.max(1, (int) Math.ceil((double) totalBlocks / targetAnimationTicks));
             return totalBlocks;
@@ -444,14 +436,30 @@ public class PlaceStructure {
             );
 
             // Final lock-in audio & particle burst
-            BlockPos centerPos = minPos.offset((maxPos.getX() - minPos.getX()) / 2, (maxPos.getY() - minPos.getY()) / 2, (maxPos.getZ() - minPos.getZ()) / 2);
+            BlockPos centerPos = minPos.offset(
+                    (maxPos.getX() - minPos.getX()) / 2,
+                    (maxPos.getY() - minPos.getY()) / 2,
+                    (maxPos.getZ() - minPos.getZ()) / 2
+            );
             level.playSound(null, centerPos, SoundEvents.IRON_GOLEM_REPAIR, SoundSource.BLOCKS, 0.8f, 1.35f);
             level.sendParticles(ParticleTypes.END_ROD,
                     centerPos.getX() + 0.5, maxPos.getY() + 0.5, centerPos.getZ() + 0.5,
-                    12, (maxPos.getX() - minPos.getX()) * 0.3, 0.3, (maxPos.getZ() - minPos.getZ()) * 0.3, 0.03);
+                    12,
+                    (maxPos.getX() - minPos.getX()) * 0.3,
+                    0.3,
+                    (maxPos.getZ() - minPos.getZ()) * 0.3,
+                    0.03
+            );
 
             PlacedStructure placed = new PlacedStructure(UUID.randomUUID(), structure.getName(), minPos, maxPos, startPos, rotationY, level.dimension());
             ServerStructureTracker.get(level).registerStructure(level, placed, placedPositions);
+
+            ItemStack held = player.getMainHandItem();
+            if (held.getItem() instanceof BuildTool) {
+                PatternDecalRenderer.registerStructureDecal(
+                        minPos, maxPos, direction, BuildTool.getPattern(held), BuildTool.getColor(held)
+                );
+            }
         }
 
         public boolean isCompleted() { return completed; }
@@ -487,10 +495,20 @@ public class PlaceStructure {
     private static BlockPos getRotatedBlockPos(BlockPos startPos, int x, int y, int z, int width, int length, Direction direction) {
         int rotatedX = x, rotatedZ = z;
         switch (direction) {
-            case EAST: rotatedX = length - 1 - z; rotatedZ = x; break;
-            case SOUTH: rotatedX = width - 1 - x; rotatedZ = length - 1 - z; break;
-            case WEST: rotatedX = z; rotatedZ = width - 1 - x; break;
-            default: break;
+            case EAST:
+                rotatedX = length - 1 - z;
+                rotatedZ = x;
+                break;
+            case SOUTH:
+                rotatedX = width - 1 - x;
+                rotatedZ = length - 1 - z;
+                break;
+            case WEST:
+                rotatedX = z;
+                rotatedZ = width - 1 - x;
+                break;
+            default:
+                break;
         }
         return startPos.offset(rotatedX, y, rotatedZ);
     }

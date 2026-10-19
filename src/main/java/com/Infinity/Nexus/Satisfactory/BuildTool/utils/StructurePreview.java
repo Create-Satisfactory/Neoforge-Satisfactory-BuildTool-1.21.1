@@ -19,7 +19,6 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Rotation;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
@@ -29,7 +28,6 @@ import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
-import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -52,7 +50,6 @@ public class StructurePreview {
     private static long previewStartTime = 0;
     private static long getPreviewDuration() { return Config.preview_duration_ms; }
 
-    // Live placement status for BuildToolOverlay
     private static boolean currentPlacementObstructed = false;
     private static boolean currentPlacementMissingItems = false;
 
@@ -237,6 +234,7 @@ public class StructurePreview {
         if (player == null) return;
 
         renderActiveBuildAnimations(event.getPoseStack(), event.getCamera());
+        PatternDecalRenderer.renderWorldDecals(event.getPoseStack(), event.getCamera());
 
         if ((BuildTool.isSelectingArea(player) || BuildTool.getPoint1(player) != null) &&
                 (player.getMainHandItem().getItem() instanceof BuildTool ||
@@ -297,13 +295,14 @@ public class StructurePreview {
         poseStack.popPose();
         bufferSource.endBatch(RenderType.translucent());
         bufferSource.endBatch(RenderType.lines());
+        bufferSource.endBatch(RenderType.debugQuads());
     }
 
     private static boolean canPlayerAfford(Player player, StructureLoader.StructureData structure, int multiplier) {
         if (player.isCreative()) return true;
-        List<StructureLoader.RequiredItem> costs = structure.isOnlyItems()
-                ? structure.getRequiredItems()
-                : structure.getAggregatedCosts();
+        ItemStack held = player.getMainHandItem();
+        String selectedMat = (held.getItem() instanceof BuildTool) ? BuildTool.getMaterial(held) : "";
+        List<StructureLoader.RequiredItem> costs = structure.getRequiredItemsForMaterial(selectedMat);
 
         for (StructureLoader.RequiredItem req : costs) {
             Item item = BuiltInRegistries.ITEM.get(ResourceLocation.parse(req.getItemId()));
@@ -326,6 +325,7 @@ public class StructurePreview {
         if (player == null) return;
 
         ItemStack heldItem = player.getMainHandItem();
+        int selectedColorIndex = (heldItem.getItem() instanceof BuildTool) ? BuildTool.getColor(heldItem) : 0;
         String selectedMaterial = (heldItem.getItem() instanceof BuildTool) ? BuildTool.getMaterial(heldItem) : "";
 
         List<List<List<String>>> activePattern = structure.getPatternForMaterial(selectedMaterial);
@@ -336,7 +336,7 @@ public class StructurePreview {
         int length = activePattern.get(0).size();
         int width = activePattern.get(0).get(0).size();
 
-        // 1. Pre-check if any block in this placement is obstructed by terrain or a protected structure
+        // 1. Check for obstructions
         List<BlockPos> obstructedPositions = new ArrayList<>();
         if (!Config.allow_obstruction_clearing) {
             for (int y = 0; y < height; y++) {
@@ -364,36 +364,16 @@ public class StructurePreview {
 
         boolean isInvalid = currentPlacementObstructed || currentPlacementMissingItems;
 
-        // 2. Choose Hologram Tint Color (Red-Orange when invalid, Cyan-Blue when valid)
-        float tintR = isInvalid ? 1.00f : (isFixed ? 0.35f : 0.45f);
-        float tintG = isInvalid ? 0.26f : (isFixed ? 0.90f : 0.82f);
+        // 2. Hologram Tint: Use true-color ice-white (0.94, 0.97, 1.0) when valid so Swatch colors are clearly visible,
+        // and Satisfactory Red-Orange (1.0, 0.26, 0.20) when obstructed or unaffordable!
+        float tintR = isInvalid ? 1.00f : 0.94f;
+        float tintG = isInvalid ? 0.26f : 0.97f;
         float tintB = isInvalid ? 0.20f : 1.00f;
-        float tintA = isInvalid ? 0.68f : 0.65f;
+        float tintA = isInvalid ? 0.70f : 0.72f;
 
         Vec3 playerPos = player.position();
         Vec3 playerLook = player.getLookAngle();
-
-        Block templateBlock = BuiltInRegistries.BLOCK.get(ResourceLocation.parse(Config.template_block));
         boolean isOfficial = structure.isServerStructure();
-
-        Block selectedColorBlock = null;
-        Block selectedMaterialBlock = null;
-
-        if (isOfficial && heldItem.getItem() instanceof BuildTool) {
-            int colorIndex = BuildTool.getColor(heldItem);
-            if (colorIndex >= 0 && colorIndex < Config.color_blocks.size()) {
-                selectedColorBlock = BuiltInRegistries.BLOCK.get(ResourceLocation.parse(Config.color_blocks.get(colorIndex)));
-            }
-
-            if (!usingMaterialSchematic && selectedMaterial != null && !selectedMaterial.isEmpty()) {
-                Config.MaterialEntry materialEntry = Config.material_blocks.stream()
-                        .filter(m -> m.name.equals(selectedMaterial))
-                        .findFirst().orElse(null);
-                if (materialEntry != null) {
-                    selectedMaterialBlock = BuiltInRegistries.BLOCK.get(ResourceLocation.parse(materialEntry.blockId));
-                }
-            }
-        }
 
         Rotation rotation = PlaceStructure.getRotationFromDirection(direction);
         Object createTransform = PlaceStructure.createStructureTransform(rotation);
@@ -415,24 +395,16 @@ public class StructurePreview {
                     Direction[] visibleFaces = getVisibleFaces(structure, activePattern, x, y, z, direction, toBlockNorm);
                     if (visibleFaces.length == 0) continue;
 
-                    BlockState blockState = structure.getBlockStateForString(rawBlockString);
-                    if (blockState != null) {
-                        if (isOfficial) {
-                            if (selectedMaterialBlock != null && blockState.getBlock().equals(BuiltInRegistries.BLOCK.get(ResourceLocation.parse(Config.base_material)))) {
-                                blockState = selectedMaterialBlock.defaultBlockState();
-                                if (selectedColorBlock != null && blockState.getBlock().getDescriptionId().contains("_concrete") &&
-                                        blockState.getBlock().getDescriptionId().contains("gray")) {
-                                    blockState = selectedColorBlock.defaultBlockState();
-                                }
-                            } else if (selectedColorBlock != null && blockState.getBlock().equals(templateBlock)) {
-                                blockState = selectedColorBlock.defaultBlockState();
-                            }
-                        }
+                    // Apply Customizer Swatch (Primary + Secondary) & Material replacements to outer block and Copycat {nbt}
+                    String customizedBlockString = PlaceStructure.applyCustomizerToRawString(
+                            rawBlockString, isOfficial, usingMaterialSchematic, selectedColorIndex, selectedMaterial
+                    );
 
-                        // Rotate BlockState using Create's StructureTransform so slopes, shafts, and copycats orient properly
+                    BlockState blockState = structure.getBlockStateForString(customizedBlockString);
+                    if (blockState != null) {
                         BlockState rotatedState = PlaceStructure.applyCreateTransform(createTransform, blockState, rotation, direction);
                         PreviewRenderer.renderPreviewBlock(
-                                rotatedState, rawBlockString, direction, rotatedPos,
+                                rotatedState, customizedBlockString, direction, rotatedPos,
                                 poseStack, bufferSource,
                                 tintR, tintG, tintB, tintA, visibleFaces
                         );
@@ -441,12 +413,21 @@ public class StructurePreview {
             }
         }
 
-        // Highlight obstructed blocks in red wireframe
         for (BlockPos badPos : obstructedPositions) {
             PreviewRenderer.renderInvalidPosition(poseStack, bufferSource, badPos, 0.85f);
         }
 
         renderStructureBoundingBox(poseStack, bufferSource, startPos, width, height, length, direction, isInvalid);
+
+        String selectedPattern = (heldItem.getItem() instanceof BuildTool) ? BuildTool.getPattern(heldItem) : "";
+        int rotW = getRotatedWidth(width, length, direction);
+        int rotL = getRotatedLength(width, length, direction);
+
+        PatternDecalRenderer.renderHologramDecal(
+                poseStack, bufferSource,
+                startPos, rotW, height, rotL,
+                direction, selectedPattern, selectedColorIndex, isInvalid
+        );
     }
 
     private static void renderActiveBuildAnimations(PoseStack poseStack, Camera camera) {
@@ -646,15 +627,15 @@ public class StructurePreview {
         int rotatedWidth = getRotatedWidth(width, length, direction);
         int rotatedLength = getRotatedLength(width, length, direction);
 
-        float r = isInvalid ? 1.0f : (isFixed ? 0.98f : 0.85f);
-        float g = isInvalid ? 0.25f : (isFixed ? 0.58f : 0.92f);
+        float r = isInvalid ? 1.0f : (isFixed ? 0.98f : 0.35f);
+        float g = isInvalid ? 0.25f : (isFixed ? 0.58f : 0.85f);
         float b = isInvalid ? 0.20f : (isFixed ? 0.27f : 1.0f);
 
         LevelRenderer.renderLineBox(
                 poseStack, lineConsumer,
                 startPos.getX(), startPos.getY(), startPos.getZ(),
                 startPos.getX() + rotatedWidth, startPos.getY() + height, startPos.getZ() + rotatedLength,
-                r, g, b, 0.65f
+                r, g, b, 0.75f
         );
     }
 

@@ -20,7 +20,7 @@ public class Config {
             .defineList("synchronized_structures", List.of("template_foundation"), o -> o instanceof String);
     public static final ModConfigSpec.BooleanValue GENERATE_TEMPLATE = BUILDER
             .comment("true = generate a template structure if the server structures folder is empty, false = do not generate")
-            .define("generate_template", true);
+            .define("generate_template", false);
     public static final ModConfigSpec.ConfigValue<List<? extends String>> IGNORED_PROPERTIES = BUILDER
             .comment("List of properties that will be ignored when pasting a structure")
             .defineList("ignored_properties", List.of(

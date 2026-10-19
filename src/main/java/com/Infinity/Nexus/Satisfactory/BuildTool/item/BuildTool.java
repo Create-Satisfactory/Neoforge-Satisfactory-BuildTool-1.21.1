@@ -59,6 +59,15 @@ public class BuildTool extends PickaxeItem {
     private static int getMaxSize() { return Config.max_structure_size; }
     private static long getMaxVolume() { return Config.max_structure_volume; }
 
+    public static String getPattern(ItemStack stack) {
+        return stack.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY)
+                .copyTag().getString("Pattern");
+    }
+
+    public static void setPattern(ItemStack stack, String patternName) {
+        CustomData.update(DataComponents.CUSTOM_DATA, stack, tag -> tag.putString("Pattern", patternName));
+    }
+
     public enum BuildMode {
         DESTRUCTION,
         CONSTRUCTION,
@@ -265,15 +274,12 @@ public class BuildTool extends PickaxeItem {
 
     private InteractionResultHolder<ItemStack> handleAreaSelection(Player player, ItemStack itemstack) {
         HitResult hitResult = player.pick(100.0D, 0.0F, false);
-
         BlockPos clickedPos;
 
         if (hitResult.getType() == HitResult.Type.BLOCK) {
-            // Player is looking at a block - use that position
             BlockHitResult blockHit = (BlockHitResult) hitResult;
             clickedPos = blockHit.getBlockPos();
         } else {
-            // Player is looking into the air - calculate position at max distance
             Vec3 eyePos = player.getEyePosition();
             Vec3 lookVec = player.getLookAngle();
             Vec3 targetPos = eyePos.add(lookVec.scale(100.0D));
@@ -287,19 +293,17 @@ public class BuildTool extends PickaxeItem {
             data.selectingArea = true;
             player.displayClientMessage(Component.translatable("message.infinity_nexus.creativity.point1_selected",
                     data.point1.getX(), data.point1.getY(), data.point1.getZ()).withStyle(ChatFormatting.GREEN), true);
-
             player.level().playSound(null, player.getX(), player.getY(), player.getZ(),
                     SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.PLAYERS, 0.5F, 1.0F);
         } else {
             data.point2 = clickedPos;
             data.selectingArea = false;
-
             player.displayClientMessage(Component.translatable("message.infinity_nexus.creativity.point2_selected",
                     data.point2.getX(), data.point2.getY(), data.point2.getZ()).withStyle(ChatFormatting.GREEN), true);
 
             if (!checkSizeLimit(player, data.point1, data.point2)) {
-                data.point2 = null; // Keep point1 but reset point2 on error
-                data.selectingArea = true; // Still "selecting" area (waiting for a valid point2)
+                data.point2 = null;
+                data.selectingArea = true;
                 return InteractionResultHolder.fail(itemstack);
             }
 
@@ -308,10 +312,14 @@ public class BuildTool extends PickaxeItem {
                 player.level().playSound(null, player.getX(), player.getY(), player.getZ(),
                         SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.PLAYERS, 0.5F, 1.0F);
             } else {
-                player.displayClientMessage(Component.translatable("message.infinity_nexus.creativity.save_prompt").withStyle(ChatFormatting.YELLOW), true);
-                player.level().playSound(null, player.getX(), player.getY(), player.getZ(),
-                        SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.PLAYERS, 0.5F, 1.0F);
-                saveStructure(player);
+                // Only save the structure ONCE on the Server thread (which has full BlockEntity NBT data).
+                // On the Client thread, just clear the selection points so the selection box hides.
+                if (!player.level().isClientSide()) {
+                    saveStructure(player);
+                } else {
+                    data.point1 = null;
+                    data.point2 = null;
+                }
             }
         }
 
@@ -387,26 +395,22 @@ public class BuildTool extends PickaxeItem {
 
     private void saveStructure(Player player) {
         SelectionData data = getSelectionData(player);
+
         if (data.point1 == null || data.point2 == null) {
             player.displayClientMessage(Component.translatable("message.infinity_nexus.creativity.no_area_selected").withStyle(ChatFormatting.RED), true);
             return;
         }
-
-
 
         BlockPos minPos = new BlockPos(
                 Math.min(data.point1.getX(), data.point2.getX()),
                 Math.min(data.point1.getY(), data.point2.getY()),
                 Math.min(data.point1.getZ(), data.point2.getZ())
         );
-
         BlockPos maxPos = new BlockPos(
                 Math.max(data.point1.getX(), data.point2.getX()),
                 Math.max(data.point1.getY(), data.point2.getY()),
                 Math.max(data.point1.getZ(), data.point2.getZ())
         );
-
-
 
         boolean success = StructureSaver.saveStructureFromWorld(
                 player.level(),
@@ -421,12 +425,8 @@ public class BuildTool extends PickaxeItem {
 
         if (success) {
             player.displayClientMessage(Component.translatable("message.infinity_nexus.creativity.structure_saved").withStyle(ChatFormatting.GREEN), true);
-
             player.level().playSound(null, player.getX(), player.getY(), player.getZ(),
                     SoundEvents.PLAYER_LEVELUP, SoundSource.PLAYERS, 1.0F, 1.0F);
-
-            StructureLoader.loadClientStructures();
-            loadStructures();
         } else {
             player.displayClientMessage(Component.translatable("message.infinity_nexus.creativity.save_failed").withStyle(ChatFormatting.RED), true);
         }
@@ -490,6 +490,11 @@ public class BuildTool extends PickaxeItem {
                 currentPos = placementPos.relative(zoopDir, i * sizeInDir);
             }
             StructurePreview.startBuildAnimation(selectedStructure, currentPos, StructurePreview.getPreviewDirection());
+            String activePattern = getPattern(itemstack);
+            int activeColorIdx = getColor(itemstack);
+            com.Infinity.Nexus.Satisfactory.BuildTool.utils.PatternDecalRenderer.onClientStructurePlaced(
+                    selectedStructure, currentPos, StructurePreview.getPreviewDirection(), activePattern, activeColorIdx
+            );
             ModMessages.sendToServer(new StructurePlacementC2SPacket(
                     packetStructure,
                     currentPos,

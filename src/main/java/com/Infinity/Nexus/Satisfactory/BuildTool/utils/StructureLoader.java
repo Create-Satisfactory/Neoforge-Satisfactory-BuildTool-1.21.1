@@ -403,6 +403,29 @@ public class StructureLoader {
                 }
             }
 
+            // Load any schematics defined in "materialVariants"
+            if (this.materialVariants != null) {
+                for (Map.Entry<String, MaterialVariantDef> entry : this.materialVariants.entrySet()) {
+                    String matKey = entry.getKey().trim().toLowerCase();
+                    MaterialVariantDef def = entry.getValue();
+                    if (def != null && def.schematic != null && !def.schematic.isEmpty()) {
+                        List<List<List<String>>> loaded = SchematicNbtHelper.loadSchematicPattern(
+                                def.schematic, sourceJsonFile, sourceResourceLoc, resourceManager
+                        );
+                        if (loaded != null && !loaded.isEmpty()) {
+                            this.materialPatterns.put(matKey, loaded);
+                            if (this.pattern == null || this.pattern.isEmpty()) {
+                                this.pattern = loaded;
+                            }
+                            String combined = entry.getKey().trim() + ":" + def.schematic.trim();
+                            if (!this.schematics.contains(combined)) {
+                                this.schematics.add(combined);
+                            }
+                        }
+                    }
+                }
+            }
+
             // 2. Fallback to single "schematic" field or "<json_name>.nbt" if the array was empty
             if (this.pattern == null || this.pattern.isEmpty()) {
                 List<List<List<String>>> fallback = SchematicNbtHelper.loadSchematicPattern(
@@ -606,8 +629,9 @@ public class StructureLoader {
             return state;
         }
 
-        private BlockState parseBlockState(String stateString) {
+        private BlockState parseBlockState(String rawStateString) {
             try {
+                String stateString = SchematicNbtHelper.stripNbt(rawStateString);
                 if (stateString == null || stateString.isEmpty() || stateString.equals(" ")) return null;
                 int bracketIndex = stateString.indexOf('[');
                 if (bracketIndex == -1) {
@@ -646,6 +670,42 @@ public class StructureLoader {
         private <T extends Comparable<T>> BlockState setPropertyValue(BlockState state, Property<T> property, String value) {
             Optional<T> parsedValue = property.getValue(value);
             return parsedValue.map(t -> state.setValue(property, t)).orElse(state);
+        }
+
+        public static class MaterialVariantDef {
+            public String schematic;
+            public List<RequiredItem> requiredItems = new ArrayList<>();
+
+            public MaterialVariantDef() {}
+            public MaterialVariantDef(String schematic, List<RequiredItem> requiredItems) {
+                this.schematic = schematic;
+                this.requiredItems = requiredItems;
+            }
+        }
+
+        // Add this field inside StructureData:
+        private Map<String, MaterialVariantDef> materialVariants = new LinkedHashMap<>();
+
+        public Map<String, MaterialVariantDef> getMaterialVariants() {
+            return materialVariants != null ? materialVariants : Collections.emptyMap();
+        }
+
+        /**
+         * Returns the RequiredItems for the given Customizer material (if overridden in materialVariants),
+         * falling back to the structure's default requiredItems.
+         */
+        public List<RequiredItem> getRequiredItemsForMaterial(@Nullable String materialName) {
+            if (materialName != null && !materialName.isEmpty() && materialVariants != null) {
+                for (Map.Entry<String, MaterialVariantDef> entry : materialVariants.entrySet()) {
+                    if (entry.getKey().equalsIgnoreCase(materialName.trim()) &&
+                            entry.getValue() != null &&
+                            entry.getValue().requiredItems != null &&
+                            !entry.getValue().requiredItems.isEmpty()) {
+                        return entry.getValue().requiredItems;
+                    }
+                }
+            }
+            return isOnlyItems() ? getRequiredItems() : getAggregatedCosts();
         }
     }
 

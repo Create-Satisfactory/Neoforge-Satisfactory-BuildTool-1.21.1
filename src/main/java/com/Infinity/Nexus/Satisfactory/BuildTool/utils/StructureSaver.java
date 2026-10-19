@@ -25,11 +25,6 @@ public class StructureSaver {
                                                  String name, String author, String description,
                                                  String category, Player player) {
         try {
-            Path dirPath = Paths.get(STRUCTURES_DIR);
-            if (!Files.exists(dirPath)) {
-                Files.createDirectories(dirPath);
-            }
-
             int minX = Math.min(pos1.getX(), pos2.getX());
             int minY = Math.min(pos1.getY(), pos2.getY());
             int minZ = Math.min(pos1.getZ(), pos2.getZ());
@@ -74,14 +69,10 @@ public class StructureSaver {
             String baseName = name.toLowerCase().replace(" ", "_");
             String schematicFileName = baseName + ".nbt";
 
-            // 1. Write the Create .nbt schematic file
-            SchematicNbtHelper.writePatternToNbtFile(pattern3D, dirPath.resolve(schematicFileName));
-
             List<String> schematicsList = new ArrayList<>(List.of("Default:" + schematicFileName));
             Map<String, List<List<List<String>>>> materialMap = new LinkedHashMap<>();
             materialMap.put("default", pattern3D);
 
-            // 2. Write the metadata JSON file with the "schematics" array
             StructureData structureData = new StructureData(
                     name, author, description, category,
                     null, null, schematicsList,
@@ -89,13 +80,22 @@ public class StructureSaver {
                     width, length, height, pattern3D, materialMap
             );
 
+            // 1. When called on the Server, send the packet to the player's client so ClientStructureSaver writes it ONCE
+            if (!level.isClientSide() && player instanceof ServerPlayer serverPlayer) {
+                StructureSyncUtils.sendStructureToPlayer(serverPlayer, structureData);
+                return true;
+            }
+
+            // 2. Fallback only if called on a pure client level without a server
+            Path dirPath = Paths.get(STRUCTURES_DIR);
+            if (!Files.exists(dirPath)) {
+                Files.createDirectories(dirPath);
+            }
+            SchematicNbtHelper.writePatternToNbtFile(pattern3D, dirPath.resolve(schematicFileName));
+
             File outputFile = new File(STRUCTURES_DIR + baseName + ".json");
             try (FileWriter writer = new FileWriter(outputFile)) {
                 GSON.toJson(structureData, writer);
-            }
-
-            if (level.getServer() != null && player instanceof ServerPlayer serverPlayer) {
-                StructureSyncUtils.sendStructureToPlayer(serverPlayer, structureData);
             }
             return true;
         } catch (IOException e) {
